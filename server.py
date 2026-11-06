@@ -45,6 +45,8 @@ youtube_jobs = {}
 youtube_jobs_lock = threading.Lock()
 video_download_jobs = {}
 video_download_jobs_lock = threading.Lock()
+align_jobs = {}
+align_jobs_lock = threading.Lock()
 REMOTE_TOKEN = secrets.token_urlsafe(24)
 remote_requests = {}
 remote_requests_lock = threading.Lock()
@@ -53,6 +55,12 @@ remote_commands_lock = threading.Lock()
 remote_state = {"songId": None, "title": "", "artist": "", "playing": False, "time": 0, "duration": 0}
 remote_state_lock = threading.Lock()
 from phone_microphone import PhoneMicrophone
+try:
+    from whisper_aligner import align_song_lyrics, is_whisper_available
+except ImportError:
+    align_song_lyrics = None
+    def is_whisper_available():
+        return False
 remote_microphone = PhoneMicrophone()
 remote_transfers = {}
 remote_transfers_lock = threading.Lock()
@@ -741,6 +749,47 @@ def read_library():
         return []
 
 
+def auto_sync_align_worker(job_id: str, song_id: str, plain_lyrics: str):
+    def progress_callback(pct, msg):
+        with align_jobs_lock:
+            if job_id in align_jobs:
+                align_jobs[job_id]["progress"] = pct
+                align_jobs[job_id]["message"] = msg
+
+    try:
+        if not align_song_lyrics or not is_whisper_available():
+            raise RuntimeError("O módulo Whisper AI local não está disponível neste ambiente.")
+
+        library = read_library()
+        song = next((s for s in library if s.get("id") == song_id), None)
+        if not song:
+            raise ValueError("Música não encontrada na biblioteca.")
+
+        # Prefer lead vocal track if available, else source mix
+        audio_name = song.get("lead") or song.get("source")
+        if not audio_name or not SAFE_NAME.fullmatch(audio_name):
+            raise ValueError("A música não possui arquivo de áudio válido.")
+
+        audio_path = MEDIA / audio_name
+        if not audio_path.is_file():
+            raise FileNotFoundError(f"Arquivo de áudio não encontrado na pasta music: {audio_name}")
+
+        result = align_song_lyrics(audio_path, plain_lyrics, progress_callback)
+        with align_jobs_lock:
+            if job_id in align_jobs:
+                align_jobs[job_id]["stage"] = "done"
+                align_jobs[job_id]["progress"] = 100
+                align_jobs[job_id]["message"] = "Sincronização concluída!"
+                align_jobs[job_id]["result"] = result
+    except Exception as error:
+        traceback.print_exc()
+        with align_jobs_lock:
+            if job_id in align_jobs:
+                align_jobs[job_id]["stage"] = "error"
+                align_jobs[job_id]["error"] = str(error)
+                align_jobs[job_id]["message"] = f"Erro no alinhamento: {error}"
+
+
 def youtube_import_status():
     try:
         import yt_dlp
@@ -993,6 +1042,11 @@ class Handler(SimpleHTTPRequestHandler):
         if youtube_job_match:
             with youtube_jobs_lock:
                 job = youtube_jobs.get(youtube_job_match.group(1))
+                return self.send_json(dict(job) if job else {"stage": "missing", "message": "Processamento não encontrado."}, 200 if job else 404)
+        align_job_match = re.fullmatch(r"/api/auto-sync/align/([a-f0-9-]{36})", path, re.I)
+        if align_job_match:
+            with align_jobs_lock:
+                job = align_jobs.get(align_job_match.group(1))
                 return self.send_json(dict(job) if job else {"stage": "missing", "message": "Processamento não encontrado."}, 200 if job else 404)
         if path == "/api/library":
             return self.send_json(read_library())
@@ -1331,6 +1385,38 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(result)
             except (ValueError, json.JSONDecodeError) as error:
                 return self.send_json({"error": str(error)}, 400)
+        if parsed_path == "/api/auto-sync/align":
+            if not self._is_loopback():
+                return self.send_error(403)
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 5 * 1024 * 1024:
+                    return self.send_json({"error": "Requisição vazia ou grande demais."}, 400)
+                request = json.loads(self.rfile.read(length))
+                song_id = str(request.get("songId") or "")
+                plain_lyrics = str(request.get("plainLyrics") or "").strip()
+                if not song_id:
+                    return self.send_json({"error": "Identificador da música ausente."}, 400)
+                if not plain_lyrics:
+                    return self.send_json({"error": "Letra da música ausente para sincronização."}, 400)
+
+                job_id = str(uuid4())
+                with align_jobs_lock:
+                    align_jobs[job_id] = {
+                        "id": job_id,
+                        "songId": song_id,
+                        "stage": "starting",
+                        "progress": 5,
+                        "message": "Inicializando alinhamento com Whisper AI...",
+                        "created": time.time()
+                    }
+                threading.Thread(target=auto_sync_align_worker, args=(job_id, song_id, plain_lyrics), daemon=True).start()
+                return self.send_json({"id": job_id, "stage": "starting"}, 202)
+            except (ValueError, json.JSONDecodeError) as error:
+                return self.send_json({"error": str(error)}, 400)
+            except Exception as error:
+                traceback.print_exc()
+                return self.send_json({"error": str(error)}, 500)
         if parsed_path in {"/api/mvsep/config", "/api/mvsep/models", "/api/youtube/search", "/api/youtube/metadata", "/api/youtube/separations", "/api/mvsep/separations", "/api/youtube/video-downloads", "/api/covers/search", "/api/covers/download"}:
             try:
                 length = int(self.headers.get("Content-Length", "0"))

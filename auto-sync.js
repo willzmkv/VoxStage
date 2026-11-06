@@ -696,17 +696,67 @@
           }
         }
 
-        // Step 2: Local Acoustic Aligner (Decodes audio in background silently)
-        onProgress('Decodificando áudio vocal em segundo plano…', 45);
-        const audioInfo = await resolveAudioBufferForSong(targetSong);
-        if (!audioInfo || !audioInfo.buffer) {
-          throw new Error('Não foi possível carregar o arquivo de áudio da música para sincronizar.');
-        }
-
+        // Step 2: High-Accuracy Whisper AI Alignment via Python backend
         const linesText = options.lyricsText || targetSong.plainLyrics || (options.editorValue) || '';
         const rawLines = linesText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
         if (!rawLines.length) {
           return { needsLyricsInput: true, song: targetSong };
+        }
+
+        if (typeof window.api === 'function' && targetSong.id) {
+          try {
+            onProgress('Iniciando alinhamento com Whisper AI…', 30);
+            const startRes = await window.api('/api/auto-sync/align', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                songId: targetSong.id,
+                plainLyrics: linesText
+              })
+            });
+
+            if (startRes && startRes.id) {
+              const jobId = startRes.id;
+              let attempts = 0;
+              let job = null;
+              while (attempts < 180) {
+                await new Promise(r => setTimeout(r, 600));
+                attempts++;
+                job = await window.api(`/api/auto-sync/align/${jobId}`);
+                if (!job) continue;
+
+                if (job.progress) {
+                  onProgress(job.message || 'Alinhando voz com Whisper AI…', Math.min(95, Math.max(30, job.progress)));
+                }
+
+                if (job.stage === 'done' && job.result) {
+                  onProgress('Sincronização concluída com sucesso!', 100);
+                  return {
+                    engine: 'whisper',
+                    syncedLyrics: job.result.syncedLyrics,
+                    plainLyrics: job.result.plainLyrics,
+                    wordTimings: job.result.wordTimings,
+                    phrasesCount: job.result.phrasesCount,
+                    provider: job.result.provider || 'VoxStage · Whisper AI Local'
+                  };
+                }
+
+                if (job.stage === 'error') {
+                  console.warn('Alinhamento Whisper AI retornou erro, tentando fallback acústico:', job.error);
+                  break;
+                }
+              }
+            }
+          } catch (whisperErr) {
+            console.warn('Whisper AI indisponível, usando fallback acústico:', whisperErr);
+          }
+        }
+
+        // Step 3: Local Acoustic Aligner Fallback (Decodes audio in background silently)
+        onProgress('Decodificando áudio vocal em segundo plano…', 45);
+        const audioInfo = await resolveAudioBufferForSong(targetSong);
+        if (!audioInfo || !audioInfo.buffer) {
+          throw new Error('Não foi possível carregar o arquivo de áudio da música para sincronizar.');
         }
 
         onProgress(audioInfo.isIsolated
