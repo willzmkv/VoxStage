@@ -638,7 +638,11 @@
     singBtn.onclick = async () => {
       closeAutoSyncModal();
       if (typeof window.playSong === 'function') {
-        await window.playSong(song.id);
+        try {
+          await window.playSong(song.id);
+        } catch (playErr) {
+          console.warn('Aviso ao iniciar reprodução:', playErr);
+        }
         const display = document.getElementById('display');
         if (display) {
           display.classList.add('show');
@@ -786,7 +790,9 @@
 
           // Save to library.json
           if (typeof window.api === 'function') {
-            const updated = { ...targetSong, ...selection };
+            const cleanTarget = { ...targetSong };
+            delete cleanTarget.buffers;
+            const updated = { ...cleanTarget, ...selection };
             await window.api('/api/library', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -799,10 +805,19 @@
           if (window.current && window.current.id === targetSong.id) {
             Object.assign(window.current, selection);
             if (window.VoxStageLyrics && selection.lyricVoices) {
-              Object.assign(window.current, window.VoxStageLyrics.project(selection.lyricVoices));
+              const projected = window.VoxStageLyrics.project(selection.lyricVoices);
+              Object.assign(window.current, projected);
             }
+            window.current.playbackTracks = null;
+            window.current.lyricIndex = null;
+            window.current.vocalSilenceEnds = [];
+            window.current.vocalSilenceState = null;
             if (typeof window.updateLyrics === 'function') {
-              window.updateLyrics(window.playbackPosition ? window.playbackPosition() : 0);
+              try {
+                window.updateLyrics(window.playbackPosition ? window.playbackPosition() : 0);
+              } catch (uiErr) {
+                console.warn('Aviso ao atualizar UI das letras após auto-sync:', uiErr);
+              }
             }
           }
 
@@ -929,10 +944,20 @@
             const singBtn = document.getElementById('manualSyncSingAction');
             if (singBtn) {
               singBtn.onclick = async () => {
-                if (typeof window.saveManualSync === 'function') await window.saveManualSync();
+                try {
+                  if (typeof window.saveManualSync === 'function') await window.saveManualSync();
+                } catch (saveErr) {
+                  console.warn('Aviso ao salvar sync manual:', saveErr);
+                }
                 const closeBtn = document.getElementById('closeManualSync');
                 if (closeBtn) closeBtn.click();
-                if (typeof window.playSong === 'function') await window.playSong(targetSong.id);
+                if (typeof window.playSong === 'function') {
+                  try {
+                    await window.playSong(targetSong.id);
+                  } catch (playErr) {
+                    console.warn('Aviso ao iniciar reprodução:', playErr);
+                  }
+                }
               };
             }
           }
@@ -1243,26 +1268,26 @@
         if (btn) btn.onclick = () => AutoSyncManager.triggerInLyricsDialog();
       }
     }
-
-    // 3. Delegate track-menu click for "data-auto-sync"
-    document.addEventListener('click', async (event) => {
-      const autoSyncTarget = event.target.closest('[data-auto-sync]');
-      if (autoSyncTarget) {
-        event.preventDefault();
-        event.stopPropagation();
-        const songId = autoSyncTarget.dataset.autoSync;
-        const all = getAllSongs();
-        const song = all.find(s => s.id === songId);
-        if (!song) return;
-
-        // Close any open menus
-        document.querySelectorAll('.track-menu').forEach(m => m.hidden = true);
-
-        // Run full background process & show ready-to-sing modal
-        await AutoSyncManager.processAndReadySong(song);
-      }
-    });
   }
+
+  // Bind delegated track-menu click for "data-auto-sync" ONCE
+  document.addEventListener('click', async (event) => {
+    const autoSyncTarget = event.target.closest('[data-auto-sync]');
+    if (autoSyncTarget) {
+      event.preventDefault();
+      event.stopPropagation();
+      const songId = autoSyncTarget.dataset.autoSync;
+      const all = getAllSongs();
+      const song = all.find(s => s.id === songId);
+      if (!song) return;
+
+      // Close any open menus
+      document.querySelectorAll('.track-menu').forEach(m => m.hidden = true);
+
+      // Run full background process & show ready-to-sing modal
+      await AutoSyncManager.processAndReadySong(song);
+    }
+  });
 
   // Bind on DOM ready
   if (document.readyState === 'loading') {

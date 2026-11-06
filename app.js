@@ -1922,8 +1922,12 @@ function positionVocalPause(seconds, lineIndex) {
   let atEnd = false;
   const lastIndex = leadLines.length ? current.lyricLines.lastIndexOf(leadLines.at(-1)) : -1;
   const duration = current.buffers?.Inst?.duration ? current.buffers.Inst.duration * 1000 : 0;
-  const manualMark = (current.manualVocalSilences || []).find(mark=>milliseconds >= Number(mark.startMs) && milliseconds <= (mark.endMs == null ? (duration || Infinity) : Number(mark.endMs)));
-  if (manualMark?.endMs == null && duration && milliseconds >= Number(manualMark.startMs)) atEnd = true;
+  const manualMark = (current?.manualVocalSilences || []).filter(Boolean).find(mark => {
+    const s = Number(mark?.startMs);
+    const e = mark?.endMs == null ? (duration || Infinity) : Number(mark?.endMs);
+    return Number.isFinite(s) && milliseconds >= s && milliseconds <= e;
+  });
+  if (manualMark?.endMs == null && duration && Number.isFinite(Number(manualMark?.startMs)) && milliseconds >= Number(manualMark.startMs)) atEnd = true;
   if (!manualMark && !atBeginning && lineIndex === lastIndex && duration) {
     const silenceStart = vocalSilenceEnd(lastIndex, duration);
     atEnd = silenceStart !== null && milliseconds >= silenceStart;
@@ -1937,10 +1941,11 @@ function isProfanityOccurrence(lineIndex, wordIndex, word) {
 }
 function activeCensorCue(milliseconds) {
   if (processingSettings.muteProfanity !== true) return false;
-  return (current?.profanityCues || []).some(cue => {
-    const line = current?.lyricLines?.[Number(cue.lineIndex)];
-    const word = line && lyricWordEntries(line.text)[Number(cue.wordIndex)]?.word;
-    return word && lyricTokenKey(word) === lyricTokenKey(cue.word)
+  return (current?.profanityCues || []).filter(Boolean).some(cue => {
+    const line = current?.lyricLines?.[Number(cue?.lineIndex)];
+    const word = line && lyricWordEntries(line.text)[Number(cue?.wordIndex)]?.word;
+    return word && cue && lyricTokenKey(word) === lyricTokenKey(cue.word)
+      && Number.isFinite(Number(cue?.startMs)) && Number.isFinite(Number(cue?.endMs))
       && milliseconds >= Number(cue.startMs) && milliseconds < Number(cue.endMs);
   });
 }
@@ -2121,19 +2126,20 @@ function lyricPlaybackTracks() {
   // An independently synced backing replaces the same phrase embedded in the
   // main LRC, even when its timestamp differs. Repeated phrases within one
   // source remain distinct.
-  const explicitRows = backing.filter(row=>row.source==='backing');
-  const backingRows = backing.filter(row=>row.source!=='inline-backing' || !explicitRows.some(explicit=>lyricTokenKey(explicit.text)===lyricTokenKey(row.text) && Math.abs(explicit.startMs-row.startMs)<8000));
-  display.classList.toggle('has-second-voice',duet.some(row=>row.source==='parallel'));
+  const explicitRows = backing.filter(row => row && row.source === 'backing');
+  const backingRows = backing.filter(row => row && (row.source !== 'inline-backing' || !explicitRows.some(explicit => explicit && lyricTokenKey(explicit.text) === lyricTokenKey(row.text) && Math.abs((explicit.startMs || 0) - (row.startMs || 0)) < 8000)));
+  display.classList.toggle('has-second-voice', duet.some(row => row && row.source === 'parallel'));
   const audioEnd = (current.buffers?.Inst?.duration || 0) * 1000;
-  for(const [rows,ends,timings] of [[backingRows,current.backingLineEnds,current.backingWordTimings],[duet,current.parallelLineEnds,current.parallelWordTimings],[lead,current.lyricLineEnds,current.wordTimings]]) rows.forEach((row,index) => {
-    const explicit = Number(ends?.[row.lineIndex]);
-    const cues = timings?.find(item=>Number(item.lineIndex)===row.lineIndex)?.words || [];
-    const cueEnd = cues.reduce((last,cue)=>Math.max(last,Number(cue.end)*1000||0),0);
+  for(const [rows,ends,timings] of [[backingRows,current.backingLineEnds,current.backingWordTimings],[duet,current.parallelLineEnds,current.parallelWordTimings],[lead,current.lyricLineEnds,current.wordTimings]]) rows.filter(Boolean).forEach((row,index) => {
+    const explicit = Number(ends?.[row?.lineIndex]);
+    const cues = timings?.find(item => Number(item?.lineIndex) === row?.lineIndex)?.words || [];
+    const cueEnd = cues.reduce((last,cue) => Math.max(last, Number(cue?.end) * 1000 || 0), 0);
     const nextStart = rows[index+1]?.startMs ?? Infinity;
-    const plausible = value => Number.isFinite(value) && value > row.startMs && (!audioEnd || value < audioEnd-120 || value-row.startMs < 15000);
+    const rowStart = Number(row?.startMs) || 0;
+    const plausible = value => Number.isFinite(value) && value > rowStart && (!audioEnd || value < audioEnd-120 || value-rowStart < 15000);
     // A backing without a marked end must never remain active until a distant
     // phrase. The short estimate is only a visual fallback.
-    row.endMs = plausible(explicit) ? explicit : plausible(cueEnd) ? cueEnd : row.startMs + Math.min(3200,Math.max(900,lyricWordEntries(row.text).length*380));
+    row.endMs = plausible(explicit) ? explicit : plausible(cueEnd) ? cueEnd : rowStart + Math.min(3200,Math.max(900,lyricWordEntries(row?.text || '').length*380));
     row.endMs = Math.min(row.endMs,nextStart,audioEnd||Infinity);
   });
   current.playbackTracks = {lines,backingEnds:current.backingLineEnds,censorCues:current.profanityCues,silences:current.manualVocalSilences,audioDuration:current.buffers?.Inst?.duration,lead,backing:backingRows,duet,silence:current.manualVocalSilences||[],censor:current.profanityCues||[]};
@@ -2144,19 +2150,19 @@ function backingLineEndMs(index) {
 }
 function updateParallelLyrics(seconds=0) {
   if(!current)return;
-  const ms=seconds*1000,tracks=lyricPlaybackTracks(),rows=tracks.duet.filter(row=>row.source==='parallel');
-  const latest=rows.findLast(item=>ms>=item.startMs);
-  const lead=tracks.lead.find(item=>item.lineIndex===current.lyricIndex);
-  const leadAtTime=lead&&ms>=lead.startMs&&ms<lead.endMs?lead:null;
+  const ms=seconds*1000,tracks=lyricPlaybackTracks(),rows=(tracks.duet||[]).filter(row=>row&&row.source==='parallel');
+  const latest=rows.findLast(item=>item&&ms>=Number(item.startMs));
+  const lead=(tracks.lead||[]).find(item=>item&&item.lineIndex===current.lyricIndex);
+  const leadAtTime=lead&&Number.isFinite(Number(lead.startMs))&&ms>=Number(lead.startMs)&&ms<Number(lead.endMs)?lead:null;
   // Once the same phrase has met, keep its single visual in place until either
   // track advances. Ending one voice must not move the phrase into the solo lane.
   // Derive this from the timelines so seeking gives the same result as playback.
   const merged=Boolean(latest&&lead&&latest.phraseKey&&latest.phraseKey===lead.phraseKey
-    && Math.max(latest.startMs,lead.startMs)<Math.min(latest.endMs,lead.endMs)
-    && ms>=Math.max(latest.startMs,lead.startMs));
-  const soloHeld=latest&&(!lead||latest.startMs>=lead.endMs);
-  const row=latest&&(ms<latest.endMs||merged||soloHeld)?latest:null,lineIndex=row?.lineIndex??-1;
-  const rowActive=Boolean(row&&ms<row.endMs);
+    && Math.max(Number(latest.startMs)||0,Number(lead.startMs)||0)<Math.min(Number(latest.endMs)||0,Number(lead.endMs)||0)
+    && ms>=Math.max(Number(latest.startMs)||0,Number(lead.startMs)||0));
+  const soloHeld=latest&&(!lead||Number(latest.startMs)>=Number(lead.endMs));
+  const row=latest&&(ms<Number(latest.endMs)||merged||soloHeld)?latest:null,lineIndex=row?.lineIndex??-1;
+  const rowActive=Boolean(row&&ms<Number(row.endMs));
   const leadNode=$('lyricCurrentLine'),root=$('lyrics'),wordMode=current.wordByWordEnabled!==false;
   root.classList.toggle('voices-overlap',Boolean(rowActive&&leadAtTime));
   root.classList.toggle('voices-merged',merged);
@@ -2179,7 +2185,7 @@ function updateParallelLyrics(seconds=0) {
   if(rowActive&&wordMode){
     const positions=VoxStageLyrics.cuePositions({text:lyricWords(raw).join(' '),words});
     for(const [index,cue] of positions)if((!row.activeWordIndices||row.activeWordIndices.includes(index))&&ms>=cue.start*1000&&ms<=cue.end*1000+240)active=index;
-    if(!words.length){const targets=row.activeWordIndices||spans.map((_,index)=>index);active=targets[Math.min(targets.length-1,Math.max(0,Math.floor((ms-row.startMs)/Math.max(1,row.endMs-row.startMs)*targets.length)))]??-1;}
+    if(!words.length){const targets=row.activeWordIndices||spans.map((_,index)=>index);const rowStart=Number(row?.startMs)||0,rowEnd=Number(row?.endMs)||rowStart+1000;active=targets[Math.min(targets.length-1,Math.max(0,Math.floor((ms-rowStart)/Math.max(1,rowEnd-rowStart)*targets.length)))]??-1;}
   }
   const nextPart=active>=0&&lyricWordEntries(raw)[active+1]?.joiner&&(!row.activeWordIndices||row.activeWordIndices.includes(active+1))?active+1:-1;
   spans.forEach((span,index)=>{span.classList.toggle('active',index===active);span.classList.toggle('upcoming',index===nextPart);});
@@ -2219,7 +2225,7 @@ function updateParallelLyrics(seconds=0) {
 function updateBackingLyrics(seconds = 0) {
   if (!current) return;
   const ms = seconds * 1000;
-  const row = lyricPlaybackTracks().backing.findLast(item=>ms>=item.startMs && ms<item.endMs);
+  const row = (lyricPlaybackTracks().backing || []).findLast(item=>item&&Number.isFinite(Number(item.startMs))&&ms>=Number(item.startMs)&&ms<Number(item.endMs));
   const index = row?.lineIndex ?? -1;
   const lines = current.lyricLines || [];
   const rawText = index >= 0 ? lines[index]?.text || '' : '';
@@ -2301,8 +2307,8 @@ function updateLyrics(seconds = 0) {
   }
   updateVocalPause(seconds);
   const ms = seconds * 1000;
-  const leadRows = lyricPlaybackTracks().lead;
-  const activeLead = leadRows.findLast(row=>row.startMs<=ms);
+  const leadRows = lyricPlaybackTracks().lead || [];
+  const activeLead = leadRows.findLast(row=>row&&Number.isFinite(Number(row.startMs))&&Number(row.startMs)<=ms);
   const index = activeLead?.lineIndex ?? -1;
   const nextIndex = leadRows.find(row=>row.lineIndex>index)?.lineIndex;
   updateBackingLyrics(seconds);
@@ -3262,7 +3268,7 @@ async function markManualSilenceBoundary() {
 }
 async function persistManualVocalSilences() {
   if (!current) return;
-  const marks = [...(current.manualVocalSilences || [])].sort((a,b)=>Number(a.startMs)-Number(b.startMs));
+  const marks = [...(current.manualVocalSilences || [])].filter(m => m && Number.isFinite(Number(m.startMs))).sort((a,b)=>Number(a.startMs)-Number(b.startMs));
   const merged = [];
   for (const mark of marks) {
     const startMs = Math.max(0, Math.round(Number(mark.startMs)));
@@ -3312,9 +3318,12 @@ async function undoLastManualSilence() {
   const marks = [...(current?.manualVocalSilences || [])];
   if (!marks.length) return;
   let latestIndex = 0;
-  for (let index = 1; index < marks.length; index++) {
-    if ((Number(marks[index].createdAt) || Number(marks[index].startMs)) >= (Number(marks[latestIndex].createdAt) || Number(marks[latestIndex].startMs))) latestIndex = index;
-  }
+  marks.forEach((mark, index) => {
+    if (!mark) return;
+    const markCur = Number(mark.createdAt) || Number(mark.startMs) || 0;
+    const markPrev = Number(marks[latestIndex]?.createdAt) || Number(marks[latestIndex]?.startMs) || 0;
+    if (markCur >= markPrev) latestIndex = index;
+  });
   marks.splice(latestIndex, 1);
   current.manualVocalSilences = marks;
   try { await persistManualVocalSilences(); toast(interfaceLanguage === 'en-US' ? 'Last silence removed.' : 'Último silêncio removido.'); }
@@ -3776,7 +3785,7 @@ async function saveCensorSync() {
   const state=manualSyncState;
   if (!current || state?.mode!=='censor') return;
   const replacement=new Set(state.queue.map(mark=>`${mark.lineIndex}:${mark.wordIndex}`));
-  const cues=[...(current.profanityCues||[]).filter(cue=>!replacement.has(`${cue.lineIndex}:${cue.wordIndex}`)),...state.cues].sort((a,b)=>a.startMs-b.startMs);
+  const cues=[...(current.profanityCues||[]).filter(cue=>cue&&!replacement.has(`${cue.lineIndex}:${cue.wordIndex}`)),...state.cues].filter(c=>c&&Number.isFinite(Number(c.startMs))).sort((a,b)=>Number(a.startMs)-Number(b.startMs));
   const song=songs.find(item=>item.id===current.id);
   if (song) {
     song.profanityMarks=current.profanityMarks||[]; song.profanityCues=cues;
