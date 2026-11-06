@@ -736,6 +736,8 @@
                     syncedLyrics: job.result.syncedLyrics,
                     plainLyrics: job.result.plainLyrics,
                     wordTimings: job.result.wordTimings,
+                    lyricLineEnds: job.result.lyricLineEnds,
+                    lyricVoices: job.result.lyricVoices,
                     phrasesCount: job.result.phrasesCount,
                     provider: job.result.provider || 'VoxStage · Whisper AI Local'
                   };
@@ -822,17 +824,22 @@
             lyricTrack: targetSong.title,
             lyricArtist: targetSong.artist || '',
             lyricProvider: result.provider,
-            wordTimings: [],
-            lyricLineEnds: []
+            wordTimings: result.wordTimings || [],
+            lyricLineEnds: result.lyricLineEnds || []
           };
 
-          if (window.VoxStageLyrics) {
+          if (result.lyricVoices && window.VoxStageLyrics) {
+            Object.assign(selection, window.VoxStageLyrics.storage(result.lyricVoices));
+          } else if (window.VoxStageLyrics) {
             const lines = (typeof window.parseSyncedLyrics === 'function')
               ? window.parseSyncedLyrics(result.syncedLyrics)
               : [];
+            const cleanTarget = { ...targetSong };
+            delete cleanTarget.buffers;
+            delete cleanTarget.lyricVoices;
             const incomingVoices = window.VoxStageLyrics.fromLegacy(
-              selection,
-              { lyricLines: lines },
+              cleanTarget,
+              { lyricLines: lines, wordTimings: selection.wordTimings, lyricLineEnds: selection.lyricLineEnds },
               window.lyricWordEntries || (t => window.VoxStageLyrics.wordEntries(t))
             );
             Object.assign(selection, window.VoxStageLyrics.storage(incomingVoices));
@@ -842,6 +849,9 @@
           if (typeof window.api === 'function') {
             const cleanTarget = { ...targetSong };
             delete cleanTarget.buffers;
+            delete cleanTarget.lyricVoices;
+            delete cleanTarget.wordTimings;
+            delete cleanTarget.lyricLineEnds;
             const updated = { ...cleanTarget, ...selection };
             await window.api('/api/library', {
               method: 'POST',
@@ -962,12 +972,16 @@
           const unified = (typeof window.unifiedLyricsForSong === 'function')
             ? window.unifiedLyricsForSong({ ...targetSong, syncedLyrics: result.syncedLyrics, plainLyrics: result.plainLyrics })
             : { lyricLines: lines };
+          if (result.wordTimings) unified.wordTimings = result.wordTimings;
+          if (result.lyricLineEnds) unified.lyricLineEnds = result.lyricLineEnds;
 
-          const incoming = window.VoxStageLyrics.fromLegacy(
-            { syncedLyrics: result.syncedLyrics, plainLyrics: result.plainLyrics },
-            unified,
-            window.lyricWordEntries || (t => window.VoxStageLyrics.wordEntries(t))
-          );
+          const incoming = (result.lyricVoices && result.lyricVoices[activeVoice])
+            ? result.lyricVoices
+            : window.VoxStageLyrics.fromLegacy(
+                { syncedLyrics: result.syncedLyrics, plainLyrics: result.plainLyrics },
+                unified,
+                window.lyricWordEntries || (t => window.VoxStageLyrics.wordEntries(t))
+              );
 
           if (incoming[activeVoice] && incoming[activeVoice].length) {
             window.manualSyncVoices[activeVoice] = incoming[activeVoice];

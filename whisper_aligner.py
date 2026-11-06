@@ -5,11 +5,12 @@ import logging
 import re
 import threading
 from pathlib import Path
-from typing import Callable, Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional, List
 
 logger = logging.getLogger("whisper_aligner")
 
 _model = None
+_model_name = None
 _model_lock = threading.Lock()
 
 
@@ -24,12 +25,17 @@ def is_whisper_available() -> bool:
 
 
 def get_whisper_model():
-    global _model
+    global _model, _model_name
     with _model_lock:
         if _model is None:
             from faster_whisper import WhisperModel
-            # 'tiny' int8 model is fast (~7s on CPU), light (~39MB), and highly accurate for alignment
-            _model = WhisperModel("tiny", device="cpu", compute_type="int8")
+            # Try 'base' for superior word boundary resolution; fallback to 'tiny'
+            try:
+                _model = WhisperModel("base", device="cpu", compute_type="int8")
+                _model_name = "base"
+            except Exception:
+                _model = WhisperModel("tiny", device="cpu", compute_type="int8")
+                _model_name = "tiny"
         return _model
 
 
@@ -91,7 +97,7 @@ def align_song_lyrics(
     model = get_whisper_model()
 
     # Create vocabulary prompt from user lyrics to guide Whisper
-    prompt = " ".join(re.findall(r"\w+", plain_lyrics_text)[:50])
+    prompt = " ".join(re.findall(r"\w+", plain_lyrics_text)[:60])
 
     notify(40, "Reconhecendo voz e fonemas com Whisper AI...")
     with _model_lock:
@@ -106,18 +112,18 @@ def align_song_lyrics(
         )
         whisper_segments = list(segs)
 
-    notify(80, "Alinhando versos da letra com a melodia...")
+    notify(80, "Alinhando versos e palavras com a melodia...")
     whisper_words = []
     for s in whisper_segments:
         for w in (s.words or []):
             word_str = w.word.strip()
             clean = re.sub(r"[^\w\s]", "", word_str.lower())
-            if clean:
+            if clean and w.end > w.start:
                 whisper_words.append({
                     "word": word_str,
                     "clean": clean,
-                    "start": float(w.start),
-                    "end": float(w.end)
+                    "start": round(float(w.start), 3),
+                    "end": round(float(w.end), 3)
                 })
 
     user_tokens = []
@@ -138,58 +144,64 @@ def align_song_lyrics(
     matcher = difflib.SequenceMatcher(None, user_cleans, whisp_cleans)
     matches = matcher.get_matching_blocks()
 
-    line_matches = {i: [] for i in range(len(lines))}
+    line_matches = {i: {} for i in range(len(lines))}
     for m in matches:
         for offset in range(m.size):
             u_idx = m.a + offset
             w_idx = m.b + offset
             l_idx = user_tokens[u_idx]["line_idx"]
-            line_matches[l_idx].append((user_tokens[u_idx], whisper_words[w_idx]))
+            w_pos = user_tokens[u_idx]["word_pos"]
+            line_matches[l_idx][w_pos] = whisper_words[w_idx]
 
-    aligned = []
+    aligned_lines = []
     last_end = 0.0
 
     for line_idx, line in enumerate(lines):
-        matched_w = [w for (_, w) in line_matches[line_idx]]
-        if matched_w:
-            start_t = matched_w[0]["start"]
-            end_t = matched_w[-1]["end"]
+        matched_dict = line_matches[line_idx]
+        words_in_line = line.split()
+        matched_list = sorted(matched_dict.values(), key=lambda x: x["start"])
+
+        if matched_list:
+            start_t = matched_list[0]["start"]
+            end_t = matched_list[-1]["end"]
             if start_t < last_end:
                 start_t = last_end + 0.05
             if end_t <= start_t:
-                end_t = start_t + 1.2
+                end_t = start_t + max(1.0, len(words_in_line) * 0.35)
             last_end = end_t
-            aligned.append({
+            aligned_lines.append({
                 "line": line,
                 "start": start_t,
                 "end": end_t,
-                "matched_words": line_matches[line_idx]
+                "words": words_in_line,
+                "matched_dict": matched_dict
             })
         else:
-            aligned.append({
+            aligned_lines.append({
                 "line": line,
                 "start": None,
                 "end": None,
-                "matched_words": []
+                "words": words_in_line,
+                "matched_dict": {}
             })
 
     # Interpolate timestamps for lines not directly recognized
-    for i, item in enumerate(aligned):
+    for i, item in enumerate(aligned_lines):
         if item["start"] is None:
             prev_end = 0.0
             for p in range(i - 1, -1, -1):
-                if aligned[p]["end"] is not None:
-                    prev_end = aligned[p]["end"]
+                if aligned_lines[p]["end"] is not None:
+                    prev_end = aligned_lines[p]["end"]
                     break
             next_start = prev_end + 4.0
-            for n in range(i + 1, len(aligned)):
-                if aligned[n]["start"] is not None:
-                    next_start = aligned[n]["start"]
+            for n in range(i + 1, len(aligned_lines)):
+                if aligned_lines[n]["start"] is not None:
+                    next_start = aligned_lines[n]["start"]
                     break
 
             missing_count = 1
-            for n in range(i + 1, len(aligned)):
-                if aligned[n]["start"] is None:
+            for n in range(i + 1, len(aligned_lines)):
+                if aligned_lines[n]["start"] is None:
                     missing_count += 1
                 else:
                     break
@@ -199,47 +211,86 @@ def align_song_lyrics(
             item["start"] = prev_end + step
             item["end"] = item["start"] + step * 0.9
 
-    lrc_lines = []
-    word_timings = {}
+    word_timings_array: List[Dict[str, Any]] = []
+    lyric_line_ends: List[int] = []
+    lrc_lines: List[str] = []
+    lead_voice_rows: List[Dict[str, Any]] = []
 
-    for i, item in enumerate(aligned):
-        start_ms = int(item["start"] * 1000)
-        end_ms = int(item["end"] * 1000)
-        lrc_lines.append(f"{fmt_lrc(item['start'])}{item['line']}")
+    for line_idx, item in enumerate(aligned_lines):
+        start_s = item["start"]
+        end_s = item["end"]
+        start_ms = int(start_s * 1000)
+        end_ms = int(end_s * 1000)
+        lyric_line_ends.append(end_ms)
+        lrc_lines.append(f"{fmt_lrc(start_s)}{item['line']}")
 
-        words = item["line"].split()
-        if not words:
-            continue
-        line_w_timings = []
-        matched_dict = {u["word_pos"]: w for (u, w) in item.get("matched_words", [])}
+        words = item["words"]
+        matched_dict = item["matched_dict"]
+        line_word_cues = []
 
-        duration = max(100, end_ms - start_ms)
-        step = duration / len(words)
-
-        for w_pos, word in enumerate(words):
+        prev_w_end = start_s
+        for w_pos, w_text in enumerate(words):
             if w_pos in matched_dict:
-                mw = matched_dict[w_pos]
-                w_start = int(mw["start"] * 1000)
-                w_end = int(mw["end"] * 1000)
+                w_start = matched_dict[w_pos]["start"]
+                w_end = matched_dict[w_pos]["end"]
+                if w_start < prev_w_end:
+                    w_start = prev_w_end
                 if w_end <= w_start:
-                    w_end = w_start + 250
+                    w_end = w_start + 0.25
             else:
-                w_start = int(start_ms + w_pos * step)
-                w_end = int(w_start + step * 0.9)
+                next_w_start = end_s
+                for n_pos in range(w_pos + 1, len(words)):
+                    if n_pos in matched_dict:
+                        next_w_start = matched_dict[n_pos]["start"]
+                        break
 
-            line_w_timings.append({
-                "word": word,
-                "startMs": w_start,
-                "endMs": w_end
+                rem_words = 1
+                for n_pos in range(w_pos + 1, len(words)):
+                    if n_pos not in matched_dict:
+                        rem_words += 1
+                    else:
+                        break
+
+                duration_slice = max(0.2, (next_w_start - prev_w_end) / rem_words)
+                w_start = prev_w_end
+                w_end = min(end_s, w_start + duration_slice * 0.95)
+                if w_end <= w_start:
+                    w_end = w_start + 0.2
+
+            prev_w_end = w_end
+            line_word_cues.append({
+                "word": w_text,
+                "start": round(w_start, 3),
+                "end": round(w_end, 3),
+                "index": w_pos
             })
-        word_timings[str(start_ms)] = line_w_timings
+
+        word_timings_array.append({
+            "lineIndex": line_idx,
+            "words": line_word_cues
+        })
+
+        lead_voice_rows.append({
+            "id": f"lead-{line_idx}",
+            "text": item["line"],
+            "time": start_ms,
+            "end": end_ms,
+            "words": line_word_cues
+        })
 
     notify(100, "Sincronização concluída com sucesso!")
 
     return {
         "syncedLyrics": "\n".join(lrc_lines),
         "plainLyrics": "\n".join(lines),
-        "wordTimings": word_timings,
-        "phrasesCount": len(aligned),
+        "wordTimings": word_timings_array,
+        "lyricLineEnds": lyric_line_ends,
+        "lyricVoices": {
+            "version": 1,
+            "lead": lead_voice_rows,
+            "parallel": [],
+            "backing": []
+        },
+        "phrasesCount": len(aligned_lines),
         "provider": "VoxStage · Whisper AI Local"
     }
