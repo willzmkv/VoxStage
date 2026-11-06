@@ -4,14 +4,79 @@
  *   2. Local Acoustic Voice-Activity & Energy Aligner (Offline / Custom Tracks / Isolated Stems)
  *
  * Runs completely in the background without requiring the song to be actively playing.
- * Once aligned, immediately saves to the library and offers the song ready to sing!
+ * Uses native VoxStage monochrome styling and real visual progress bar.
  */
 (() => {
   'use strict';
 
+  // --- Monochrome Icon Helpers ---
+
+  const ICONS = {
+    sync: '<svg class="vox-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>',
+    success: '<svg class="vox-icon-success" viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>',
+    play: '<svg class="vox-icon" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7Z"/></svg>',
+    spinner: '<svg class="vox-icon-spin" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10"/></svg>'
+  };
+
+  // --- Song & Library Accessors (Never fails with "Escolha uma música primeiro") ---
+
+  function getAllSongs() {
+    try {
+      if (typeof songs !== 'undefined' && Array.isArray(songs) && songs.length) return songs;
+    } catch {}
+    if (typeof window.songs !== 'undefined' && Array.isArray(window.songs) && window.songs.length) return window.songs;
+    return [];
+  }
+
+  function resolveActiveSong(explicitSong = null) {
+    if (explicitSong && explicitSong.id) return explicitSong;
+
+    // 1. Check lexical current or window.current
+    try {
+      if (typeof current !== 'undefined' && current && current.id) {
+        window.current = current;
+        return current;
+      }
+    } catch {}
+    if (typeof window.current !== 'undefined' && window.current && window.current.id) {
+      return window.current;
+    }
+
+    const all = getAllSongs();
+
+    // 2. Check manualSyncReturn
+    try {
+      if (typeof manualSyncReturn !== 'undefined' && manualSyncReturn?.songId) {
+        const found = all.find(s => s.id === manualSyncReturn.songId);
+        if (found) return found;
+      }
+    } catch {}
+    if (typeof window.manualSyncReturn !== 'undefined' && window.manualSyncReturn?.songId) {
+      const found = all.find(s => s.id === window.manualSyncReturn.songId);
+      if (found) return found;
+    }
+
+    // 3. Check editingSong
+    try {
+      if (typeof editingSong !== 'undefined' && editingSong && editingSong.id) return editingSong;
+    } catch {}
+    if (typeof window.editingSong !== 'undefined' && window.editingSong && window.editingSong.id) return window.editingSong;
+
+    // 4. Check display / nowTitle element
+    const trackEl = document.getElementById('dispTrack') || document.getElementById('nowTitle');
+    if (trackEl && trackEl.textContent && trackEl.textContent !== '—' && trackEl.textContent.trim() !== '') {
+      const text = trackEl.textContent.trim().toLowerCase();
+      const found = all.find(s => s.title && text.includes(s.title.toLowerCase()));
+      if (found) return found;
+    }
+
+    // 5. Fallback: first available song in library
+    if (all.length) return all[0];
+    return null;
+  }
+
   // --- Voice Activity Detection & Acoustic Alignment Primitives ---
 
-  // 2nd-order Butterworth bandpass filter for vocal range (approx 260Hz - 3400Hz)
   function createVocalBandpassFilter(sampleRate, lowFreq = 260, highFreq = 3400) {
     const nyquist = sampleRate / 2;
     const low = Math.max(0.001, Math.min(0.95, lowFreq / nyquist));
@@ -42,13 +107,10 @@
     };
   }
 
-  // Extracts mono PCM samples from AudioBuffer (averages channels if stereo)
   function extractMonoSamples(audioBuffer) {
     const length = audioBuffer.length;
     const channels = audioBuffer.numberOfChannels;
-    if (channels === 1) {
-      return audioBuffer.getChannelData(0);
-    }
+    if (channels === 1) return audioBuffer.getChannelData(0);
     const mono = new Float32Array(length);
     const left = audioBuffer.getChannelData(0);
     const right = audioBuffer.getChannelData(1);
@@ -58,14 +120,12 @@
     return mono;
   }
 
-  // Detects vocal phrases and onsets from audio buffer using VAD
   function detectVocalPhrases(audioBuffer, isVocalIsolated = true) {
     if (!audioBuffer) return [];
     const sampleRate = audioBuffer.sampleRate;
     const rawSamples = extractMonoSamples(audioBuffer);
     const length = rawSamples.length;
 
-    // Filter audio if not an isolated vocal stem to focus on human voice formant band
     let samples = rawSamples;
     if (!isVocalIsolated) {
       const filter = createVocalBandpassFilter(sampleRate, 260, 3400);
@@ -75,7 +135,6 @@
       }
     }
 
-    // 25ms frame, 12.5ms hop
     const frameSize = Math.max(128, Math.round(sampleRate * 0.025));
     const hopSize = Math.max(64, Math.round(sampleRate * 0.0125));
     const numFrames = Math.floor((length - frameSize) / hopSize);
@@ -98,7 +157,6 @@
 
     if (maxEnergy < 0.0005) return [];
 
-    // Smooth energy envelope (fast attack 25ms, release 100ms)
     const attackAlpha = Math.exp(-0.0125 / 0.025);
     const releaseAlpha = Math.exp(-0.0125 / 0.100);
     const envelope = new Float32Array(numFrames);
@@ -113,7 +171,6 @@
       envelope[i] = currentEnv;
     }
 
-    // Sample envelope percentiles to adaptively determine voice activity threshold
     const step = Math.max(1, Math.floor(numFrames / 5000));
     const subsampled = [];
     for (let i = 0; i < numFrames; i += step) {
@@ -124,7 +181,6 @@
     const p15 = subsampled[Math.floor(subsampled.length * 0.15)] || 0.001;
     const p85 = subsampled[Math.floor(subsampled.length * 0.85)] || maxEnergy * 0.5;
 
-    // Dynamic threshold: higher confidence for voice onset
     const voiceThreshold = isVocalIsolated
       ? Math.max(p15 * 1.5, p15 + (p85 - p15) * 0.12, maxEnergy * 0.05)
       : Math.max(p15 * 1.8, p15 + (p85 - p15) * 0.22, maxEnergy * 0.10);
@@ -150,7 +206,6 @@
         if (silenceFrames >= minSilenceFrames) {
           const endFrame = i - silenceFrames;
           if (endFrame - startFrame >= minVoiceFrames) {
-            // Apply slight lookahead padding (-60ms) and release padding (+120ms)
             const startTime = Math.max(0, (startFrame * hopSize) / sampleRate - 0.06);
             const endTime = Math.min(audioBuffer.duration, (endFrame * hopSize) / sampleRate + 0.12);
             intervals.push({ start: startTime, end: endTime });
@@ -160,7 +215,6 @@
       }
     }
 
-    // Flush last interval if file ended during voice
     if (inVoice) {
       const endFrame = numFrames - 1;
       if (endFrame - startFrame >= minVoiceFrames) {
@@ -174,7 +228,6 @@
     return intervals;
   }
 
-  // Rough syllable and phonetic weight estimation for duration proportionality
   function estimateLineWeight(text) {
     const clean = String(text || '').trim();
     if (!clean) return 1;
@@ -187,12 +240,10 @@
     return Math.max(1, syllables + words.length * 0.35);
   }
 
-  // Aligns lyric lines to detected acoustic phrases using dynamic programming
   function alignLinesToAcousticPhrases(lines, phrases, totalAudioDuration = 0) {
     const validLines = lines.map(line => String(line || '').trim()).filter(Boolean);
     if (!validLines.length) return [];
     if (!phrases.length) {
-      // Fallback: distribute evenly if no phrases were detected
       const step = totalAudioDuration ? (totalAudioDuration / (validLines.length + 1)) : 5;
       return validLines.map((line, idx) => ({
         text: line,
@@ -207,7 +258,6 @@
     const weights = validLines.map(estimateLineWeight);
     const totalWeight = weights.reduce((a, b) => a + b, 0);
 
-    // If fewer phrases than lines, subdivide phrases monotonically
     if (M < N) {
       const results = [];
       let pIdx = 0;
@@ -228,7 +278,6 @@
       return results;
     }
 
-    // Dynamic Programming: partition M phrases into N contiguous blocks
     function groupNetSinging(j, k) {
       let sum = 0;
       for (let idx = j; idx <= k; idx++) {
@@ -238,8 +287,6 @@
     }
 
     const totalNetSinging = phrases.reduce((acc, p) => acc + (p.end - p.start), 0) || 1;
-
-    // dp[i][j]: min cost of assigning first i lines to first j phrases
     const dp = Array.from({ length: N + 1 }, () => new Float64Array(M + 1).fill(Infinity));
     const parent = Array.from({ length: N + 1 }, () => new Int32Array(M + 1).fill(-1));
     dp[0][0] = 0;
@@ -250,7 +297,6 @@
         for (let k = i - 1; k < j; k++) {
           if (dp[i - 1][k] === Infinity) continue;
 
-          // Huge penalty for spanning long silence breaks (>2.2s) within the SAME lyric line
           let gapPenalty = 0;
           for (let gapIdx = k; gapIdx < j - 1; gapIdx++) {
             const gap = phrases[gapIdx + 1].start - phrases[gapIdx].end;
@@ -270,7 +316,6 @@
       }
     }
 
-    // Backtrack to find boundaries
     const boundaries = [];
     let currJ = M;
     for (let i = N; i >= 1; i--) {
@@ -292,7 +337,6 @@
     });
   }
 
-  // Generates word-level timing cues within a phrase for karaoke bounce & highlight
   function generateWordCues(text, startSec, endSec) {
     const rawTokens = String(text || '').trim().split(/\s+/).filter(Boolean);
     if (!rawTokens.length) return [];
@@ -319,7 +363,6 @@
     return cues;
   }
 
-  // Formats milliseconds into standard LRC timestamp [mm:ss.xx]
   function formatLrcTimestamp(ms) {
     const totalCentis = Math.max(0, Math.round(ms / 10));
     const mins = Math.floor(totalCentis / 6000);
@@ -332,7 +375,7 @@
 
   function cleanSearchQuery(title, artist = '') {
     const cleanTitle = String(title || '')
-      .replace(/^\s*\d+[\s.-]+/, '') // strip leading track numbers e.g. "01 - "
+      .replace(/^\s*\d+[\s.-]+/, '')
       .replace(/\s*[\(\[](?:official\s*(?:video|audio|music\s*video)|lyric\s*video|clipe\s*oficial|áudio\s*oficial|remaster(?:ed)?(?:\s*\d+)?|remasterizado|ao\s*vivo|live|hd|4k)[^\)\]]*[\)\]]/gi, '')
       .replace(/(?:roformer|karaoke|instrumentals?|vocals?|backing|stem|mt\s*\d+).*/ig, '')
       .replace(/\s+/g, ' ')
@@ -352,7 +395,6 @@
 
     const headers = { 'X-User-Agent': 'VoxStage/2.0 (local karaoke player auto-sync)' };
 
-    // 1. Try exact duration get if duration is available (LRCLIB exact match)
     if (duration > 10) {
       try {
         const roundedDuration = Math.round(duration);
@@ -370,7 +412,7 @@
               artistName: data.artistName || cleanArtist,
               albumName: data.albumName || '',
               duration: data.duration,
-              lyricProvider: 'LRCLIB (correspondência exata de duração)'
+              lyricProvider: 'LRCLIB (correspondência exata)'
             };
           }
         }
@@ -379,7 +421,6 @@
       }
     }
 
-    // 2. Fallback: Search endpoint with query
     try {
       const q = [cleanTitle, cleanArtist].filter(Boolean).join(' ');
       const url = `https://lrclib.net/api/search?q=${encodeURIComponent(q)}`;
@@ -390,7 +431,6 @@
           const syncedCandidates = results.filter(r => r && r.syncedLyrics && !r.instrumental);
           if (syncedCandidates.length) {
             if (duration > 10) {
-              // Score by duration closeness
               syncedCandidates.sort((a, b) => Math.abs((a.duration || 0) - duration) - Math.abs((b.duration || 0) - duration));
               const best = syncedCandidates[0];
               if (Math.abs((best.duration || 0) - duration) <= 4.0) {
@@ -426,7 +466,7 @@
     return null;
   }
 
-  // --- Background Decoding Helper (Decodes audio silently without playing) ---
+  // --- Background Audio Decoding (Without starting playback) ---
 
   async function resolveAudioBufferForSong(song) {
     if (!song) return null;
@@ -456,7 +496,7 @@
     return { buffer: decoded, isIsolated: Boolean(song.lead && stem === song.lead) };
   }
 
-  // --- Auto-Sync Modal Dialog (Clean progress and "Cantar agora" flow) ---
+  // --- Dedicated Progress Modal with Real Visual Progress Bar ---
 
   let autoSyncModalEl = null;
 
@@ -466,42 +506,46 @@
     if (!modal) {
       modal = document.createElement('div');
       modal.id = 'autoSyncModal';
-      modal.className = 'auto-sync-modal-overlay';
+      modal.className = 'vox-sync-modal-overlay';
       modal.innerHTML = `
-        <div class="auto-sync-card" role="dialog" aria-modal="true">
-          <header class="auto-sync-head">
+        <div class="vox-sync-card" role="dialog" aria-modal="true">
+          <header class="vox-sync-head">
             <div>
-              <span class="auto-sync-kicker">VOXSTAGE · AUTO-SYNC</span>
+              <span class="vox-sync-kicker">VOXSTAGE · AUTO-SYNC</span>
               <h2 id="autoSyncModalTitle">Sincronização Automática</h2>
             </div>
-            <button class="auto-sync-close-btn" id="autoSyncModalClose" aria-label="Fechar">×</button>
+            <button class="vox-sync-close" id="autoSyncModalClose" aria-label="Fechar">×</button>
           </header>
 
-          <div id="autoSyncBodyProgress" class="auto-sync-body">
-            <div class="auto-sync-icon-pulse" id="autoSyncPulseIcon">⚡</div>
-            <div class="auto-sync-status-msg" id="autoSyncModalStatus">Iniciando análise…</div>
-            <div class="auto-sync-bar-wrap">
-              <div class="auto-sync-bar-fill" id="autoSyncBarFill"></div>
+          <div id="autoSyncBodyProgress" class="vox-sync-body">
+            <div class="vox-sync-progress-box">
+              <div class="vox-sync-progress-header">
+                <span class="vox-sync-progress-status" id="autoSyncModalStatus">Iniciando…</span>
+                <span class="vox-sync-progress-percent" id="autoSyncPercentText">10%</span>
+              </div>
+              <div class="vox-sync-progress-track">
+                <div class="vox-sync-progress-bar" id="autoSyncBarFill" style="width: 10%;"></div>
+              </div>
             </div>
           </div>
 
-          <div id="autoSyncBodyLyricsPrompt" class="auto-sync-body" hidden>
-            <p class="auto-sync-prompt-copy">
-              Não encontramos letra salva nem correspondência online. Cole a letra abaixo para que o motor acústico alinhe com a voz do cantor:
+          <div id="autoSyncBodyLyricsPrompt" class="vox-sync-body" hidden>
+            <p class="vox-sync-prompt-copy">
+              Cole a letra da música abaixo. O motor acústico alinhará cada frase aos vocais cantados:
             </p>
             <textarea id="autoSyncPromptText" rows="7" placeholder="Cole a letra da música aqui, uma frase por linha…"></textarea>
-            <button class="btn auto-sync-prompt-submit" id="autoSyncPromptSubmit" type="button">
-              ⚡ Sincronizar com a Voz da Música
+            <button class="btn vox-sync-prompt-submit" id="autoSyncPromptSubmit" type="button">
+              ${ICONS.sync} <span>Alinhar com a Voz da Música</span>
             </button>
           </div>
 
-          <div id="autoSyncBodyReady" class="auto-sync-body" hidden>
-            <div class="auto-sync-success-badge">✨</div>
-            <h3 class="auto-sync-ready-heading">Sincronização Concluída!</h3>
-            <p class="auto-sync-ready-copy" id="autoSyncReadyMsg">Todas as frases foram alinhadas com a voz cantada.</p>
-            <div class="auto-sync-actions">
-              <button class="btn auto-sync-sing-action" id="autoSyncSingNowBtn" type="button">
-                ▶ Cantar agora
+          <div id="autoSyncBodyReady" class="vox-sync-body" hidden>
+            <div class="vox-sync-ready-icon">${ICONS.success}</div>
+            <h3 class="vox-sync-ready-heading">Sincronização Concluída!</h3>
+            <p class="vox-sync-ready-copy" id="autoSyncReadyMsg">Todas as frases foram alinhadas com exatidão.</p>
+            <div class="vox-sync-actions">
+              <button class="btn vox-sync-sing-action" id="autoSyncSingNowBtn" type="button">
+                ${ICONS.play} <span>Cantar agora</span>
               </button>
               <button class="btn secondary" id="autoSyncDoneBtn" type="button">
                 Concluir
@@ -525,17 +569,21 @@
     document.getElementById('autoSyncBodyProgress').hidden = false;
     document.getElementById('autoSyncBodyLyricsPrompt').hidden = true;
     document.getElementById('autoSyncBodyReady').hidden = true;
-    document.getElementById('autoSyncModalStatus').textContent = 'Iniciando…';
-    document.getElementById('autoSyncBarFill').style.width = '10%';
+    updateAutoSyncModalStatus('Iniciando análise…', 10);
     modal.classList.add('show');
   }
 
   function updateAutoSyncModalStatus(msg, progressPercent) {
     ensureAutoSyncModal();
     const status = document.getElementById('autoSyncModalStatus');
+    const percentEl = document.getElementById('autoSyncPercentText');
     const bar = document.getElementById('autoSyncBarFill');
     if (status) status.textContent = msg;
-    if (bar && progressPercent != null) bar.style.width = `${progressPercent}%`;
+    if (progressPercent != null) {
+      const pct = Math.max(5, Math.min(100, Math.round(progressPercent)));
+      if (percentEl) percentEl.textContent = `${pct}%`;
+      if (bar) bar.style.width = `${pct}%`;
+    }
   }
 
   function showAutoSyncLyricsPrompt(onSubmit) {
@@ -571,7 +619,7 @@
 
     const msg = document.getElementById('autoSyncReadyMsg');
     if (msg) {
-      msg.textContent = `${phraseCount} frases foram sincronizadas com a voz cantada da faixa. A música já está pronta para o palco!`;
+      msg.textContent = `${phraseCount} frases foram alinhadas à faixa vocal. A música já está pronta para o palco!`;
     }
 
     const singBtn = document.getElementById('autoSyncSingNowBtn');
@@ -602,11 +650,11 @@
     fetchOnlineSyncedLyrics,
     estimateLineWeight,
 
-    // Run AutoSync on ANY song in the library (does not require playback!)
+    // Run AutoSync on ANY song (does not require playback!)
     async autoSyncSong(song, options = {}) {
-      const targetSong = song || window.current;
+      const targetSong = resolveActiveSong(song);
       if (!targetSong) {
-        if (typeof window.toast === 'function') window.toast('Escolha uma música da biblioteca primeiro.');
+        if (typeof window.toast === 'function') window.toast('Selecione uma música primeiro.');
         return null;
       }
 
@@ -618,7 +666,7 @@
 
         // Step 1: Check Online Synced DB if not forced local and has title
         if (!options.forceLocal && targetSong.title) {
-          onProgress('Buscando sincronização no catálogo LRCLIB…', 25);
+          onProgress('Buscando correspondência de duração exata no catálogo…', 25);
           const onlineMatch = await fetchOnlineSyncedLyrics(targetSong.title, targetSong.artist, audioDuration);
           if (onlineMatch && onlineMatch.syncedLyrics) {
             onProgress('Sincronização encontrada com exatidão!', 90);
@@ -633,10 +681,10 @@
         }
 
         // Step 2: Local Acoustic Aligner (Decodes audio in background silently)
-        onProgress('Carregando áudio vocal em segundo plano…', 40);
+        onProgress('Decodificando áudio vocal em segundo plano…', 45);
         const audioInfo = await resolveAudioBufferForSong(targetSong);
         if (!audioInfo || !audioInfo.buffer) {
-          throw new Error('Não foi possível carregar a faixa de áudio da música para sincronizar.');
+          throw new Error('Não foi possível carregar o arquivo de áudio da música para sincronizar.');
         }
 
         const linesText = options.lyricsText || targetSong.plainLyrics || (options.editorValue) || '';
@@ -646,15 +694,15 @@
         }
 
         onProgress(audioInfo.isIsolated
-          ? 'Detectando atividade na voz isolada…'
-          : 'Identificando frequências vocais no áudio…', 65);
+          ? 'Analisando ataques e pausas na faixa vocal isolada…'
+          : 'Identificando frequências da voz no áudio…', 68);
 
         const phrases = detectVocalPhrases(audioInfo.buffer, audioInfo.isIsolated);
         if (!phrases.length) {
-          throw new Error('Não foi possível identificar frases vocais no áudio desta música.');
+          throw new Error('Não identifiquei frases vocais suficientes no áudio desta música.');
         }
 
-        onProgress(`Alinhando ${rawLines.length} frases com os vocais detectados…`, 85);
+        onProgress(`Alinhando ${rawLines.length} frases com os vocais detectados…`, 86);
         const alignedLines = alignLinesToAcousticPhrases(rawLines, phrases, audioInfo.buffer.duration);
 
         const syncedLyrics = alignedLines.map(line => `${formatLrcTimestamp(line.time)}${line.text}`).join('\n');
@@ -673,15 +721,20 @@
       }
     },
 
-    // Completely process song, save to library, and display ready-to-sing dialog
+    // Completely process song, save to library, and display ready-to-sing modal
     async processAndReadySong(song, options = {}) {
-      if (!song) return;
-      openAutoSyncModal(song.title);
-      updateAutoSyncModalStatus('Iniciando sincronização automática…', 15);
+      const targetSong = resolveActiveSong(song);
+      if (!targetSong) {
+        if (typeof window.toast === 'function') window.toast('Selecione uma música primeiro.');
+        return;
+      }
+
+      openAutoSyncModal(targetSong.title);
+      updateAutoSyncModalStatus('Iniciando análise…', 15);
 
       const runSync = async (customText = null) => {
         try {
-          const result = await this.autoSyncSong(song, {
+          const result = await this.autoSyncSong(targetSong, {
             ...options,
             lyricsText: customText || options.lyricsText,
             onProgress: (msg, pct) => updateAutoSyncModalStatus(msg, pct)
@@ -689,19 +742,19 @@
 
           if (!result) return;
 
-          // If song needs plain lyrics input, prompt user inside modal
+          // If plain lyrics are missing, prompt user inside modal
           if (result.needsLyricsInput) {
             showAutoSyncLyricsPrompt(text => runSync(text));
             return;
           }
 
           // Build storage format and project voices
-          updateAutoSyncModalStatus('Gravando na biblioteca…', 92);
+          updateAutoSyncModalStatus('Gravando na biblioteca…', 94);
           const selection = {
             syncedLyrics: result.syncedLyrics,
             plainLyrics: result.plainLyrics,
-            lyricTrack: song.title,
-            lyricArtist: song.artist || '',
+            lyricTrack: targetSong.title,
+            lyricArtist: targetSong.artist || '',
             lyricProvider: result.provider,
             wordTimings: [],
             lyricLineEnds: []
@@ -719,19 +772,19 @@
             Object.assign(selection, window.VoxStageLyrics.storage(incomingVoices));
           }
 
-          // Save to backend library.json
+          // Save to library.json
           if (typeof window.api === 'function') {
-            const updated = { ...song, ...selection };
+            const updated = { ...targetSong, ...selection };
             await window.api('/api/library', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(updated)
             });
-            Object.assign(song, updated);
+            Object.assign(targetSong, updated);
           }
 
-          // Update current if this song is loaded
-          if (window.current && window.current.id === song.id) {
+          // Update current if this song is active
+          if (window.current && window.current.id === targetSong.id) {
             Object.assign(window.current, selection);
             if (window.VoxStageLyrics && selection.lyricVoices) {
               Object.assign(window.current, window.VoxStageLyrics.project(selection.lyricVoices));
@@ -741,14 +794,15 @@
             }
           }
 
-          // Re-render library grid so the badge updates immediately to "Sincronizada"
+          // Refresh library grid to update badge to "Sincronizada"
           if (typeof window.render === 'function') window.render();
 
-          // Show ready to sing state!
-          showAutoSyncReady(song, result.phrasesCount || 0);
+          // Show ready to sing state
+          updateAutoSyncModalStatus('Sincronização concluída!', 100);
+          showAutoSyncReady(targetSong, result.phrasesCount || 0);
 
           if (typeof window.toast === 'function') {
-            window.toast(`“${song.title}” sincronizada com sucesso!`);
+            window.toast(`“${targetSong.title}” sincronizada com sucesso!`);
           }
         } catch (err) {
           console.error('Falha ao sincronizar música:', err);
@@ -760,7 +814,7 @@
       await runSync();
     },
 
-    // Trigger auto-sync inside the manual line sync dialog (without requiring playback!)
+    // Trigger auto-sync inside the manual line sync dialog
     async triggerInManualSyncDialog() {
       const activeVoice = window.manualSyncFocus || 'lead';
       const editor = (typeof window.manualSyncEditor === 'function')
@@ -773,38 +827,54 @@
       const btn = document.getElementById('manualAutoSyncButton');
       if (btn) {
         btn.disabled = true;
-        btn.innerHTML = '<span class="auto-sync-spinner">⏳</span> Sincronizando…';
+        btn.innerHTML = `${ICONS.spinner} <span>Sincronizando…</span>`;
       }
 
       const statusEl = document.getElementById('manualSyncCurrent');
       const prevStatus = statusEl ? statusEl.innerHTML : '';
 
       try {
-        const targetSong = window.current || (window.songs && window.songs[0]);
+        const targetSong = resolveActiveSong();
         if (!targetSong) {
-          if (typeof window.toast === 'function') window.toast('Escolha uma música primeiro.');
+          if (typeof window.toast === 'function') window.toast('Selecione uma música primeiro.');
           return;
         }
 
-        let result = null;
+        // Render visual progress bar directly into manual sync card
+        const setInlineProgress = (msg, pct) => {
+          if (statusEl) {
+            statusEl.innerHTML = `
+              <div class="vox-sync-progress-box" style="margin:4px 0;text-align:left;">
+                <div class="vox-sync-progress-header">
+                  <span class="vox-sync-progress-status">${msg}</span>
+                  <span class="vox-sync-progress-percent">${pct}%</span>
+                </div>
+                <div class="vox-sync-progress-track">
+                  <div class="vox-sync-progress-bar" style="width:${pct}%;"></div>
+                </div>
+              </div>
+            `;
+          }
+        };
 
-        // If editor has lines, prioritize acoustic alignment of those exact lines with the vocal track!
+        setInlineProgress('Analisando faixa vocal em segundo plano…', 20);
+
+        let result = null;
         if (editorValue) {
-          if (statusEl) statusEl.textContent = '⚡ Analisando voz da música em segundo plano…';
           result = await this.autoSyncSong(targetSong, {
             forceLocal: true,
             lyricsText: editorValue,
-            onProgress: (msg) => { if (statusEl) statusEl.textContent = msg; }
+            onProgress: (msg, pct) => setInlineProgress(msg, pct || 50)
           });
         } else {
-          // If editor is empty, try online sync first
-          if (statusEl) statusEl.textContent = '⚡ Buscando letra sincronizada online…';
           result = await this.autoSyncSong(targetSong, {
-            onProgress: (msg) => { if (statusEl) statusEl.textContent = msg; }
+            onProgress: (msg, pct) => setInlineProgress(msg, pct || 50)
           });
         }
 
         if (!result || result.needsLyricsInput) return;
+
+        setInlineProgress('Aplicando tempos…', 95);
 
         // Update manualSyncVoices with newly computed times
         if (window.manualSyncVoices && window.VoxStageLyrics) {
@@ -833,16 +903,15 @@
           const progressEl = document.getElementById('manualSyncProgress');
           if (progressEl) {
             const count = window.manualSyncVoices[activeVoice].filter(r => r.time != null).length;
-            progressEl.textContent = `✨ ${count} frases sincronizadas automaticamente!`;
+            progressEl.textContent = `${count} frases sincronizadas automaticamente`;
           }
 
           if (statusEl) {
             statusEl.innerHTML = `
-              <span style="color:#74dbd3;font-weight:700;">✨ Sincronização automática concluída!</span><br>
-              <span style="display:inline-flex;gap:8px;margin-top:8px;align-items:center;">
-                <button class="btn" id="manualSyncSingAction" type="button" style="background:#74dbd3;color:#111;font-weight:800;padding:6px 14px;font-size:12px;">▶ Cantar agora</button>
-                <small style="color:#bbb;font-size:13px;">ou clique em “Salvar sync”</small>
-              </span>
+              <div style="display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;padding:8px 0;">
+                <span style="color:var(--lime, #c8f568);font-weight:700;">Sincronização concluída!</span>
+                <button class="btn" id="manualSyncSingAction" type="button" style="padding:7px 16px;font-size:12px;">${ICONS.play} <span>Cantar agora</span></button>
+              </div>
             `;
 
             const singBtn = document.getElementById('manualSyncSingAction');
@@ -858,8 +927,8 @@
 
           if (typeof window.toast === 'function') {
             window.toast(result.engine === 'online'
-              ? 'Letra sincronizada via catálogo LRCLIB! Pronta para cantar.'
-              : 'Letra alinhada automaticamente com os vocais! Pronta para cantar.');
+              ? 'Letra sincronizada via catálogo! Pronta para cantar.'
+              : 'Letra alinhada automaticamente com a voz! Pronta para cantar.');
           }
         }
       } catch (err) {
@@ -869,16 +938,16 @@
       } finally {
         if (btn) {
           btn.disabled = false;
-          btn.innerHTML = '<span class="auto-sync-icon">⚡</span> Auto-Sincronizar';
+          btn.innerHTML = `${ICONS.sync} <span>Auto-Sincronizar</span>`;
         }
       }
     },
 
     // Trigger auto-sync inside the lyrics search dialog
     async triggerInLyricsDialog() {
-      const targetSong = window.current || (window.songs && window.songs[0]);
+      const targetSong = resolveActiveSong();
       if (!targetSong) {
-        if (typeof window.toast === 'function') window.toast('Escolha uma música primeiro.');
+        if (typeof window.toast === 'function') window.toast('Selecione uma música primeiro.');
         return;
       }
 
@@ -897,178 +966,172 @@
 
   window.VoxStageAutoSync = AutoSyncManager;
 
-  // --- UI Injections and Event Bindings ---
+  // --- UI Injections and Event Bindings (Strictly Monochrome & Native Theme) ---
 
   function setupAutoSyncUI() {
-    // 1. Inject Style for AutoSync elements
     if (!document.getElementById('voxstage-auto-sync-styles')) {
       const style = document.createElement('style');
       style.id = 'voxstage-auto-sync-styles';
       style.textContent = `
+        /* Monochrome AutoSync Theme */
+        .vox-icon {
+          display: inline-block;
+          vertical-align: middle;
+          flex: none;
+        }
+        .vox-icon-spin {
+          display: inline-block;
+          vertical-align: middle;
+          animation: voxSpin 0.9s linear infinite;
+        }
+        @keyframes voxSpin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
         .auto-sync-btn {
-          border-color: #74dbd3 !important;
-          color: #74dbd3 !important;
-          font-weight: 700 !important;
-          transition: all 0.2s ease !important;
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+          transition: background 0.16s, border-color 0.16s, transform 0.16s;
         }
-        .auto-sync-btn:hover:not(:disabled) {
-          background: rgba(116, 219, 211, 0.16) !important;
-          border-color: #92ebe4 !important;
-          color: #92ebe4 !important;
-          transform: translateY(-1px);
-        }
-        .auto-sync-btn:active:not(:disabled) {
-          transform: translateY(0);
-        }
-        .lyrics-auto-sync-box {
+        .lyrics-auto-sync-card {
           display: flex;
           flex-direction: column;
-          gap: 6px;
-          margin: 10px 0 14px;
-          padding: 12px 14px;
-          background: rgba(116, 219, 211, 0.07);
-          border: 1px solid rgba(116, 219, 211, 0.24);
-          border-radius: 12px;
+          gap: 8px;
+          margin: 12px 0 16px;
+          padding: 13px 15px;
+          background: #1d1e23;
+          border: 1px solid #33343c;
+          border-radius: 13px;
         }
-        .lyrics-auto-sync-box button {
-          display: flex;
+        .lyrics-auto-sync-card button {
+          display: inline-flex;
           align-items: center;
           justify-content: center;
           gap: 8px;
           min-height: 40px;
-          border-color: #74dbd3;
-          color: #74dbd3;
           font-weight: 700;
           font-size: 13px;
         }
-        .lyrics-auto-sync-box button:hover:not(:disabled) {
-          background: rgba(116, 219, 211, 0.18);
-          color: #fff;
-        }
-        .lyrics-auto-sync-hint {
-          color: #b0d8d5;
+        .lyrics-auto-sync-copy {
+          color: #9f9fa8;
           font-size: 11px;
-          line-height: 1.4;
+          line-height: 1.45;
           text-align: center;
         }
-        .auto-sync-icon {
-          display: inline-block;
-          font-size: 15px;
-          filter: drop-shadow(0 0 4px #74dbd3);
+
+        /* Native Progress Box */
+        .vox-sync-progress-box {
+          width: 100%;
+          box-sizing: border-box;
+          padding: 12px 14px;
+          background: #141518;
+          border: 1px solid #32333b;
+          border-radius: 12px;
         }
-        .auto-sync-spinner {
-          display: inline-block;
-          animation: autoSyncSpin 1s infinite linear;
+        .vox-sync-progress-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          font-size: 12px;
+          margin-bottom: 8px;
+          color: #ddd;
         }
-        @keyframes autoSyncSpin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
+        .vox-sync-progress-percent {
+          font-weight: 700;
+          color: var(--lime, #c8f568);
+          font-variant-numeric: tabular-nums;
+        }
+        .vox-sync-progress-track {
+          width: 100%;
+          height: 6px;
+          background: #25262c;
+          border-radius: 6px;
+          overflow: hidden;
+        }
+        .vox-sync-progress-bar {
+          height: 100%;
+          background: var(--lime, #c8f568);
+          border-radius: 6px;
+          transition: width 0.28s ease;
         }
 
-        /* Auto-Sync Dedicated Modal */
-        .auto-sync-modal-overlay {
+        /* Modal Overlay */
+        .vox-sync-modal-overlay {
           position: fixed;
           inset: 0;
           z-index: 99999;
           display: none;
           place-items: center;
           padding: 16px;
-          background: rgba(6, 7, 9, 0.88);
-          backdrop-filter: blur(12px);
+          background: rgba(8, 9, 11, 0.88);
+          backdrop-filter: blur(10px);
         }
-        .auto-sync-modal-overlay.show {
+        .vox-sync-modal-overlay.show {
           display: grid;
         }
-        .auto-sync-card {
+        .vox-sync-card {
           box-sizing: border-box;
-          width: min(520px, 94vw);
+          width: min(500px, 94vw);
           max-height: 88dvh;
           overflow: auto;
           padding: 22px 24px;
-          border: 1px solid #36373e;
-          border-radius: 20px;
-          background: #18191d;
-          box-shadow: 0 20px 70px rgba(0, 0, 0, 0.8);
+          border: 1px solid #3a3b43;
+          border-radius: 18px;
+          background: #1a1b1f;
+          box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
           display: flex;
           flex-direction: column;
           gap: 16px;
-          animation: autoSyncScaleIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+          animation: voxScale 0.18s cubic-bezier(0.16, 1, 0.3, 1);
         }
-        @keyframes autoSyncScaleIn {
-          from { transform: scale(0.95); opacity: 0; }
+        @keyframes voxScale {
+          from { transform: scale(0.96); opacity: 0; }
           to { transform: scale(1); opacity: 1; }
         }
-        .auto-sync-head {
+        .vox-sync-head {
           display: flex;
           justify-content: space-between;
           align-items: flex-start;
           gap: 12px;
-          border-bottom: 1px solid #28292f;
+          border-bottom: 1px solid #2b2c33;
           padding-bottom: 12px;
         }
-        .auto-sync-kicker {
+        .vox-sync-kicker {
           font-size: 10px;
           letter-spacing: 1.5px;
           font-weight: 800;
-          color: #74dbd3;
+          color: #a8a8b2;
           text-transform: uppercase;
         }
-        .auto-sync-head h2 {
+        .vox-sync-head h2 {
           font-size: 18px;
           margin: 4px 0 0;
           color: #fff;
           font-weight: 700;
         }
-        .auto-sync-close-btn {
+        .vox-sync-close {
           background: transparent;
           color: #888;
-          font-size: 24px;
+          font-size: 22px;
           line-height: 1;
           padding: 4px;
           cursor: pointer;
         }
-        .auto-sync-close-btn:hover {
+        .vox-sync-close:hover {
           color: #fff;
         }
-        .auto-sync-body {
+        .vox-sync-body {
           display: flex;
           flex-direction: column;
           align-items: center;
           text-align: center;
           gap: 12px;
-          padding: 10px 0;
+          padding: 8px 0;
         }
-        .auto-sync-icon-pulse {
-          font-size: 34px;
-          color: #74dbd3;
-          animation: autoSyncPulse 1.4s ease-in-out infinite;
-        }
-        @keyframes autoSyncPulse {
-          0%, 100% { transform: scale(1); filter: drop-shadow(0 0 4px #74dbd3); }
-          50% { transform: scale(1.15); filter: drop-shadow(0 0 14px #74dbd3); }
-        }
-        .auto-sync-status-msg {
-          font-size: 14px;
-          font-weight: 600;
-          color: #e5e5ea;
-        }
-        .auto-sync-bar-wrap {
-          width: 100%;
-          height: 6px;
-          background: #25262c;
-          border-radius: 6px;
-          overflow: hidden;
-          margin-top: 4px;
-        }
-        .auto-sync-bar-fill {
-          height: 100%;
-          background: linear-gradient(90deg, #74dbd3, #a2f2eb);
-          border-radius: 6px;
-          transition: width 0.3s ease;
-        }
-        .auto-sync-prompt-copy {
+        .vox-sync-prompt-copy {
           font-size: 13px;
-          color: #c7c7cf;
+          color: #b8b8c2;
           line-height: 1.5;
           margin: 0;
           text-align: left;
@@ -1089,52 +1152,47 @@
         }
         #autoSyncPromptText:focus {
           outline: none;
-          border-color: #74dbd3;
+          border-color: #666;
         }
-        .auto-sync-prompt-submit {
+        .vox-sync-prompt-submit {
           width: 100%;
           justify-content: center;
-          background: #74dbd3;
-          color: #111;
-          font-weight: 800;
           min-height: 42px;
         }
-        .auto-sync-success-badge {
-          font-size: 38px;
+        .vox-sync-ready-icon {
+          color: var(--lime, #c8f568);
+          margin-bottom: 2px;
         }
-        .auto-sync-ready-heading {
+        .vox-sync-ready-heading {
           font-size: 19px;
-          color: #74dbd3;
+          color: #fff;
           margin: 0;
           font-weight: 800;
         }
-        .auto-sync-ready-copy {
+        .vox-sync-ready-copy {
           font-size: 13px;
-          color: #c7c7cf;
+          color: #a8a8b2;
           line-height: 1.5;
           margin: 0;
         }
-        .auto-sync-actions {
+        .vox-sync-actions {
           display: flex;
           gap: 10px;
           justify-content: center;
           width: 100%;
-          margin-top: 8px;
+          margin-top: 6px;
         }
-        .auto-sync-sing-action {
+        .vox-sync-sing-action {
           flex: 1;
           justify-content: center;
-          background: #74dbd3;
-          color: #111;
-          font-weight: 800;
-          font-size: 14px;
-          min-height: 44px;
+          font-size: 13px;
+          min-height: 42px;
         }
       `;
       document.head.append(style);
     }
 
-    // 2. Add "⚡ Auto-Sincronizar" to manualSyncDialog footer
+    // 1. Add Monochrome "Auto-Sincronizar" to manualSyncDialog footer
     const manualDialog = document.getElementById('manualSyncDialog');
     if (manualDialog && !document.getElementById('manualAutoSyncButton')) {
       const footer = manualDialog.querySelector('footer');
@@ -1144,29 +1202,27 @@
         autoBtn.id = 'manualAutoSyncButton';
         autoBtn.className = 'btn secondary auto-sync-btn';
         autoBtn.type = 'button';
-        autoBtn.innerHTML = '<span class="auto-sync-icon">⚡</span> Auto-Sincronizar';
-        autoBtn.title = 'Alinha automaticamente a letra com os vocais da música sem precisar esperar tocar';
+        autoBtn.innerHTML = `${ICONS.sync} <span>Auto-Sincronizar</span>`;
+        autoBtn.title = 'Alinha automaticamente a letra com a faixa vocal em segundo plano';
         autoBtn.onclick = () => AutoSyncManager.triggerInManualSyncDialog();
 
-        // Place right beside "Começar do início"
         startBtn.after(autoBtn);
       }
     }
 
-    // 3. Add "⚡ Sincronizar Automaticamente" to lyricsDialog
+    // 2. Add Monochrome "Sincronizar Automaticamente" to lyricsDialog
     const lyricsDialog = document.getElementById('lyricsDialog');
     if (lyricsDialog && !document.getElementById('lyricsDialogAutoSyncBtn')) {
-      const card = lyricsDialog.querySelector('.lyrics-dialog-card');
       const searchRow = lyricsDialog.querySelector('.lyrics-search-row');
-      if (card && searchRow) {
+      if (searchRow) {
         const box = document.createElement('div');
-        box.className = 'lyrics-auto-sync-box';
+        box.className = 'lyrics-auto-sync-card';
         box.innerHTML = `
           <button class="btn secondary" id="lyricsDialogAutoSyncBtn" type="button">
-            <span class="auto-sync-icon">⚡</span> Sincronizar Automaticamente
+            ${ICONS.sync} <span>Sincronizar Automaticamente</span>
           </button>
-          <span class="lyrics-auto-sync-hint">
-            Busca tempos no catálogo LRCLIB ou decodifica a faixa vocal em segundo plano para alinhar com a voz do cantor.
+          <span class="lyrics-auto-sync-copy">
+            Busca tempos exatos no catálogo ou decodifica a faixa vocal em segundo plano para alinhar com a voz do cantor.
           </span>
         `;
         searchRow.after(box);
@@ -1176,14 +1232,15 @@
       }
     }
 
-    // 4. Delegate track-menu click for "data-auto-sync"
+    // 3. Delegate track-menu click for "data-auto-sync"
     document.addEventListener('click', async (event) => {
       const autoSyncTarget = event.target.closest('[data-auto-sync]');
       if (autoSyncTarget) {
         event.preventDefault();
         event.stopPropagation();
         const songId = autoSyncTarget.dataset.autoSync;
-        const song = (window.songs || []).find(s => s.id === songId);
+        const all = getAllSongs();
+        const song = all.find(s => s.id === songId);
         if (!song) return;
 
         // Close any open menus
@@ -1202,7 +1259,6 @@
     setupAutoSyncUI();
   }
 
-  // Also re-verify bindings when dialogs open
   const observer = new MutationObserver(() => {
     setupAutoSyncUI();
   });

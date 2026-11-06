@@ -569,6 +569,7 @@ loadSongs = async function () {
     await mobileStorageReady;
     songs = await api('/api/library');
     songs.forEach(song => { song.coverUrl = mediaUrl(song.cover); });
+    window.songs = songs;
     render();
   } catch (error) {
     console.error(error);
@@ -583,7 +584,7 @@ render = function () {
   libraryDisplayOrder=list.map(song=>song.id);
   $('songCount').textContent = songs.filter(song => showHiddenSongs || !song.hidden).length;
   $('grid').classList.toggle('compact-view', compactTrackView);
-  $('grid').innerHTML = list.length ? list.map((song, index) => { return `<article class="track" data-song-id="${esc(song.id)}"><div class="cover c${index % 6 + 1}"><span class="cover-letter">${esc((song.title || '♫')[0].toUpperCase())}</span>${song.cover ? `<img class="cover-image" src="${mediaUrl(song.cover)}" alt="Capa de ${esc(song.title)}">` : ''}<button class="track-play" data-play="${song.id}" aria-label="Tocar ${esc(song.title)}">▶</button></div><div class="track-info"><div class="track-title" title="${esc(song.title)}">${esc(song.title)}</div><div class="track-artist">${esc(song.artist || 'Artista desconhecido')}</div><div class="track-meta"><span class="tag">${song.separationStatus === 'pending' ? 'Não separada' : song.back ? '3 stems' : '2 stems'}</span><div class="track-actions"><button class="action-icon ${song.favorite ? 'is-fav' : ''}" title="${song.favorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}" aria-label="${song.favorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}" data-fav="${song.id}">★</button><div class="track-menu-wrap"><button class="action-icon track-menu-toggle" title="Mais opções" aria-label="Mais opções para ${esc(song.title)}" aria-expanded="false" data-menu-toggle="${song.id}">⋮</button><div class="track-menu" data-track-menu="${song.id}" hidden><button type="button" data-add-queue="${esc(song.id)}">＋ <span>Adicionar à fila</span></button><button type="button" data-fav="${esc(song.id)}">☆ <span>${song.favorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}</span></button>${song.source && !song.lead ? `<button type="button" data-mvsep-separate="${song.id}">✦ <span>Separar com MVSEP</span></button>` : ''}<button type="button" data-auto-sync="${esc(song.id)}">⚡ <span>Auto-sincronizar letra</span></button><button type="button" data-export-song="${song.id}">⇩ <span>Exportar música</span></button><button type="button" data-edit="${song.id}">✎ <span>Editar música</span></button><button type="button" data-hide-song="${song.id}">◌ <span>${song.hidden ? "Mostrar música" : "Ocultar música"}</span></button><button type="button" class="menu-delete" data-delete="${song.id}">× <span>Apagar música</span></button></div></div></div></div></div></article>`; }).join('') : `<div class="empty">${favoriteOnly ? 'Você ainda não favoritou músicas.' : songs.length ? 'Nenhuma música encontrada.' : 'Sua biblioteca está vazia. Adicione uma música para começar.'}</div>`;
+  $('grid').innerHTML = list.length ? list.map((song, index) => { return `<article class="track" data-song-id="${esc(song.id)}"><div class="cover c${index % 6 + 1}"><span class="cover-letter">${esc((song.title || '♫')[0].toUpperCase())}</span>${song.cover ? `<img class="cover-image" src="${mediaUrl(song.cover)}" alt="Capa de ${esc(song.title)}">` : ''}<button class="track-play" data-play="${song.id}" aria-label="Tocar ${esc(song.title)}">▶</button></div><div class="track-info"><div class="track-title" title="${esc(song.title)}">${esc(song.title)}</div><div class="track-artist">${esc(song.artist || 'Artista desconhecido')}</div><div class="track-meta"><span class="tag">${song.separationStatus === 'pending' ? 'Não separada' : song.back ? '3 stems' : '2 stems'}</span><div class="track-actions"><button class="action-icon ${song.favorite ? 'is-fav' : ''}" title="${song.favorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}" aria-label="${song.favorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}" data-fav="${song.id}">★</button><div class="track-menu-wrap"><button class="action-icon track-menu-toggle" title="Mais opções" aria-label="Mais opções para ${esc(song.title)}" aria-expanded="false" data-menu-toggle="${song.id}">⋮</button><div class="track-menu" data-track-menu="${song.id}" hidden><button type="button" data-add-queue="${esc(song.id)}">＋ <span>Adicionar à fila</span></button><button type="button" data-fav="${esc(song.id)}">☆ <span>${song.favorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}</span></button>${song.source && !song.lead ? `<button type="button" data-mvsep-separate="${song.id}">✦ <span>Separar com MVSEP</span></button>` : ''}<button type="button" data-auto-sync="${esc(song.id)}">⟲ <span>Auto-sincronizar letra</span></button><button type="button" data-export-song="${song.id}">⇩ <span>Exportar música</span></button><button type="button" data-edit="${song.id}">✎ <span>Editar música</span></button><button type="button" data-hide-song="${song.id}">◌ <span>${song.hidden ? "Mostrar música" : "Ocultar música"}</span></button><button type="button" class="menu-delete" data-delete="${song.id}">× <span>Apagar música</span></button></div></div></div></div></div></article>`; }).join('') : `<div class="empty">${favoriteOnly ? 'Você ainda não favoritou músicas.' : songs.length ? 'Nenhuma música encontrada.' : 'Sua biblioteca está vazia. Adicione uma música para começar.'}</div>`;
   if (compactTrackView) document.querySelectorAll('.grid.compact-view .track').forEach(card => {
     const coverImage = card.querySelector('.cover-image');
     if (coverImage) card.style.setProperty('--track-cover', `url("${coverImage.src}")`);
@@ -1277,7 +1278,7 @@ function editSong(id) {
   if (!song) return;
   const draftId = `edit:${id}`;
   if (uploadDrafts.has(draftId)) { activateUploadDraft(draftId); showModal(); return; }
-  captureUploadDraft(); activeUploadDraftId = draftId; editingSong = song;
+  captureUploadDraft(); activeUploadDraftId = draftId; editingSong = song; window.editingSong = editingSong;
   draftLyrics = null;
   $('draftLyricsStatus').textContent = editingSong.syncedLyrics ? `Letra salva: ${editingSong.lyricTrack || editingSong.title}` : 'Opcional · você pode buscar pela internet';
   chosenFiles = ['source', 'inst', 'lead', 'back', 'cover', 'background', 'backgroundVideo']
@@ -1584,7 +1585,7 @@ stopSong = function () {
   playing = false;
   stopActiveSources();
   playbackBase = 0; playbackStartContextTime = 0; waveformPeaks = null;
-  current = null;
+  current = null; window.current = null;
   updateSongVolumeControls(null);
   if (mobileNative) try { window.VoxStageMedia?.clear(); } catch {}
   setPlayBusy(false);
@@ -2337,6 +2338,7 @@ let lyricsDialogContext = 'current';
 let lyricsSearchSequence = 0;
 let lyricsSearchController = null;
 function openLyricsDialog(context = 'current') {
+  window.current = current; window.editingSong = editingSong;
   lyricsDialogContext = context;
   const source = context === 'draft' ? {title: $('titleInput').value, artist: $('artistInput').value} : current;
   $('lyricsDialogTitle').textContent = context === 'draft' ? 'Adicionar letra à música' : 'Letras sincronizadas';
@@ -2468,7 +2470,7 @@ async function useLyricCandidate(matchOrIndex, context = lyricsDialogContext) {
 
 playSong = async function (id) {
   const song = songs.find(item => item.id === id); if (!song) return;
-  stopSong(); current = {...song, buffers: {}}; waveformPeaks = null;
+  stopSong(); current = {...song, buffers: {}}; window.current = current; waveformPeaks = null;
   updateSongVolumeControls(song);
   updateWordSyncToggle();
   setPlayBusy(true);
@@ -3559,6 +3561,7 @@ function openManualLineSync() {
   if (manualSyncState) { enterSyncStage(); return; }
   leaveSyncStage();
   manualSyncReturn={songId:current.id,position:playbackPosition(),playing};
+  window.current = current; window.manualSyncReturn = manualSyncReturn;
   manualSyncDialog.classList.remove('confirm-discard');
   manualSyncVoices=VoxStageLyrics.fromLegacy(current,current.lyricLines?current:unifiedLyricsForSong(current),lyricWordEntries);
   manualSyncFocus='lead';
