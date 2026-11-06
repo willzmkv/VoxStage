@@ -2,7 +2,9 @@
  * Provides Dual-Engine Auto-Sync:
  *   1. Multi-Provider Instant Synced DB Match (LRCLIB Exact Duration Matching)
  *   2. Local Acoustic Voice-Activity & Energy Aligner (Offline / Custom Tracks / Isolated Stems)
- * Does NOT use MVSEP. Runs 100% locally or via instant public duration-matched sync.
+ *
+ * Runs completely in the background without requiring the song to be actively playing.
+ * Once aligned, immediately saves to the library and offers the song ready to sing!
  */
 (() => {
   'use strict';
@@ -424,9 +426,9 @@
     return null;
   }
 
-  // --- Decoding Helper ---
+  // --- Background Decoding Helper (Decodes audio silently without playing) ---
 
-  async function resolveAudioBufferForSong(song = window.current) {
+  async function resolveAudioBufferForSong(song) {
     if (!song) return null;
     if (song.buffers?.Lead) return { buffer: song.buffers.Lead, isIsolated: true };
     if (song.buffers?.Inst) return { buffer: song.buffers.Inst, isIsolated: false };
@@ -445,11 +447,149 @@
     const arrayBuffer = await response.arrayBuffer();
     const decoded = await ctx.decodeAudioData(arrayBuffer);
 
-    if (song.buffers) {
-      if (song.lead && stem === song.lead) song.buffers.Lead = decoded;
-      else song.buffers.Inst = decoded;
+    if (!song.buffers) song.buffers = {};
+    if (song.lead && stem === song.lead) {
+      song.buffers.Lead = decoded;
+    } else {
+      song.buffers.Inst = decoded;
     }
     return { buffer: decoded, isIsolated: Boolean(song.lead && stem === song.lead) };
+  }
+
+  // --- Auto-Sync Modal Dialog (Clean progress and "Cantar agora" flow) ---
+
+  let autoSyncModalEl = null;
+
+  function ensureAutoSyncModal() {
+    if (autoSyncModalEl) return autoSyncModalEl;
+    let modal = document.getElementById('autoSyncModal');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'autoSyncModal';
+      modal.className = 'auto-sync-modal-overlay';
+      modal.innerHTML = `
+        <div class="auto-sync-card" role="dialog" aria-modal="true">
+          <header class="auto-sync-head">
+            <div>
+              <span class="auto-sync-kicker">VOXSTAGE · AUTO-SYNC</span>
+              <h2 id="autoSyncModalTitle">Sincronização Automática</h2>
+            </div>
+            <button class="auto-sync-close-btn" id="autoSyncModalClose" aria-label="Fechar">×</button>
+          </header>
+
+          <div id="autoSyncBodyProgress" class="auto-sync-body">
+            <div class="auto-sync-icon-pulse" id="autoSyncPulseIcon">⚡</div>
+            <div class="auto-sync-status-msg" id="autoSyncModalStatus">Iniciando análise…</div>
+            <div class="auto-sync-bar-wrap">
+              <div class="auto-sync-bar-fill" id="autoSyncBarFill"></div>
+            </div>
+          </div>
+
+          <div id="autoSyncBodyLyricsPrompt" class="auto-sync-body" hidden>
+            <p class="auto-sync-prompt-copy">
+              Não encontramos letra salva nem correspondência online. Cole a letra abaixo para que o motor acústico alinhe com a voz do cantor:
+            </p>
+            <textarea id="autoSyncPromptText" rows="7" placeholder="Cole a letra da música aqui, uma frase por linha…"></textarea>
+            <button class="btn auto-sync-prompt-submit" id="autoSyncPromptSubmit" type="button">
+              ⚡ Sincronizar com a Voz da Música
+            </button>
+          </div>
+
+          <div id="autoSyncBodyReady" class="auto-sync-body" hidden>
+            <div class="auto-sync-success-badge">✨</div>
+            <h3 class="auto-sync-ready-heading">Sincronização Concluída!</h3>
+            <p class="auto-sync-ready-copy" id="autoSyncReadyMsg">Todas as frases foram alinhadas com a voz cantada.</p>
+            <div class="auto-sync-actions">
+              <button class="btn auto-sync-sing-action" id="autoSyncSingNowBtn" type="button">
+                ▶ Cantar agora
+              </button>
+              <button class="btn secondary" id="autoSyncDoneBtn" type="button">
+                Concluir
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+      document.body.append(modal);
+
+      document.getElementById('autoSyncModalClose').onclick = closeAutoSyncModal;
+      document.getElementById('autoSyncDoneBtn').onclick = closeAutoSyncModal;
+    }
+    autoSyncModalEl = modal;
+    return modal;
+  }
+
+  function openAutoSyncModal(songTitle) {
+    const modal = ensureAutoSyncModal();
+    document.getElementById('autoSyncModalTitle').textContent = songTitle ? `“${songTitle}”` : 'Sincronização Automática';
+    document.getElementById('autoSyncBodyProgress').hidden = false;
+    document.getElementById('autoSyncBodyLyricsPrompt').hidden = true;
+    document.getElementById('autoSyncBodyReady').hidden = true;
+    document.getElementById('autoSyncModalStatus').textContent = 'Iniciando…';
+    document.getElementById('autoSyncBarFill').style.width = '10%';
+    modal.classList.add('show');
+  }
+
+  function updateAutoSyncModalStatus(msg, progressPercent) {
+    ensureAutoSyncModal();
+    const status = document.getElementById('autoSyncModalStatus');
+    const bar = document.getElementById('autoSyncBarFill');
+    if (status) status.textContent = msg;
+    if (bar && progressPercent != null) bar.style.width = `${progressPercent}%`;
+  }
+
+  function showAutoSyncLyricsPrompt(onSubmit) {
+    ensureAutoSyncModal();
+    document.getElementById('autoSyncBodyProgress').hidden = true;
+    document.getElementById('autoSyncBodyReady').hidden = true;
+    const promptSection = document.getElementById('autoSyncBodyLyricsPrompt');
+    promptSection.hidden = false;
+
+    const textarea = document.getElementById('autoSyncPromptText');
+    textarea.value = '';
+    textarea.focus();
+
+    const submitBtn = document.getElementById('autoSyncPromptSubmit');
+    submitBtn.onclick = () => {
+      const text = textarea.value.trim();
+      if (!text) {
+        if (typeof window.toast === 'function') window.toast('Cole o texto da letra primeiro.');
+        return;
+      }
+      promptSection.hidden = true;
+      document.getElementById('autoSyncBodyProgress').hidden = false;
+      onSubmit(text);
+    };
+  }
+
+  function showAutoSyncReady(song, phraseCount) {
+    ensureAutoSyncModal();
+    document.getElementById('autoSyncBodyProgress').hidden = true;
+    document.getElementById('autoSyncBodyLyricsPrompt').hidden = true;
+    const readySection = document.getElementById('autoSyncBodyReady');
+    readySection.hidden = false;
+
+    const msg = document.getElementById('autoSyncReadyMsg');
+    if (msg) {
+      msg.textContent = `${phraseCount} frases foram sincronizadas com a voz cantada da faixa. A música já está pronta para o palco!`;
+    }
+
+    const singBtn = document.getElementById('autoSyncSingNowBtn');
+    singBtn.onclick = async () => {
+      closeAutoSyncModal();
+      if (typeof window.playSong === 'function') {
+        await window.playSong(song.id);
+        const display = document.getElementById('display');
+        if (display) {
+          display.classList.add('show');
+          display.classList.remove('mobile-controls-hidden');
+        }
+      }
+    };
+  }
+
+  function closeAutoSyncModal() {
+    if (autoSyncModalEl) autoSyncModalEl.classList.remove('show');
   }
 
   // --- High-Level AutoSync Manager ---
@@ -462,10 +602,11 @@
     fetchOnlineSyncedLyrics,
     estimateLineWeight,
 
-    // Run AutoSync on the song (prioritizing online exact match, then acoustic local aligner)
-    async autoSyncSong(song = window.current, options = {}) {
-      if (!song) {
-        if (typeof window.toast === 'function') window.toast('Toque uma música primeiro.');
+    // Run AutoSync on ANY song in the library (does not require playback!)
+    async autoSyncSong(song, options = {}) {
+      const targetSong = song || window.current;
+      if (!targetSong) {
+        if (typeof window.toast === 'function') window.toast('Escolha uma música da biblioteca primeiro.');
         return null;
       }
 
@@ -473,46 +614,47 @@
       const onProgress = options.onProgress || (() => {});
 
       try {
-        const audioDuration = song.duration || (song.buffers?.Inst?.duration) || (song.buffers?.Lead?.duration) || 0;
+        const audioDuration = targetSong.duration || (targetSong.buffers?.Inst?.duration) || (targetSong.buffers?.Lead?.duration) || 0;
 
-        // Step 1: Check Online Synced DB if not forced local
-        if (!options.forceLocal && song.title) {
-          onProgress('Buscando sincronização no catálogo LRCLIB…');
-          const onlineMatch = await fetchOnlineSyncedLyrics(song.title, song.artist, audioDuration);
+        // Step 1: Check Online Synced DB if not forced local and has title
+        if (!options.forceLocal && targetSong.title) {
+          onProgress('Buscando sincronização no catálogo LRCLIB…', 25);
+          const onlineMatch = await fetchOnlineSyncedLyrics(targetSong.title, targetSong.artist, audioDuration);
           if (onlineMatch && onlineMatch.syncedLyrics) {
-            onProgress('Sincronização encontrada com exatidão!');
+            onProgress('Sincronização encontrada com exatidão!', 90);
             return {
               engine: 'online',
               syncedLyrics: onlineMatch.syncedLyrics,
               plainLyrics: onlineMatch.plainLyrics,
-              provider: onlineMatch.lyricProvider
+              provider: onlineMatch.lyricProvider,
+              phrasesCount: onlineMatch.syncedLyrics.split(/\r?\n/).filter(Boolean).length
             };
           }
         }
 
-        // Step 2: Local Acoustic Aligner
-        onProgress('Carregando áudio para análise acústica local…');
-        const audioInfo = await resolveAudioBufferForSong(song);
+        // Step 2: Local Acoustic Aligner (Decodes audio in background silently)
+        onProgress('Carregando áudio vocal em segundo plano…', 40);
+        const audioInfo = await resolveAudioBufferForSong(targetSong);
         if (!audioInfo || !audioInfo.buffer) {
-          throw new Error('Não foi possível carregar a faixa de áudio para sincronizar.');
+          throw new Error('Não foi possível carregar a faixa de áudio da música para sincronizar.');
         }
 
-        const linesText = options.lyricsText || song.plainLyrics || (options.editorValue) || '';
+        const linesText = options.lyricsText || targetSong.plainLyrics || (options.editorValue) || '';
         const rawLines = linesText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
         if (!rawLines.length) {
-          throw new Error('A música não tem texto de letra. Cole ou escreva a letra no editor.');
+          return { needsLyricsInput: true, song: targetSong };
         }
 
         onProgress(audioInfo.isIsolated
-          ? 'Detectando atividade na faixa vocal isolada…'
-          : 'Analisando frequências vocais no instrumental…');
+          ? 'Detectando atividade na voz isolada…'
+          : 'Identificando frequências vocais no áudio…', 65);
 
         const phrases = detectVocalPhrases(audioInfo.buffer, audioInfo.isIsolated);
         if (!phrases.length) {
-          throw new Error('Não identifiquei frases vocais suficientes no áudio.');
+          throw new Error('Não foi possível identificar frases vocais no áudio desta música.');
         }
 
-        onProgress(`Alinhando ${rawLines.length} frases com os vocais detectados…`);
+        onProgress(`Alinhando ${rawLines.length} frases com os vocais detectados…`, 85);
         const alignedLines = alignLinesToAcousticPhrases(rawLines, phrases, audioInfo.buffer.duration);
 
         const syncedLyrics = alignedLines.map(line => `${formatLrcTimestamp(line.time)}${line.text}`).join('\n');
@@ -523,7 +665,7 @@
           syncedLyrics,
           plainLyrics,
           alignedLines,
-          phrasesCount: phrases.length,
+          phrasesCount: alignedLines.length,
           provider: 'VoxStage · Alinhador Acústico Local'
         };
       } finally {
@@ -531,7 +673,94 @@
       }
     },
 
-    // Trigger auto-sync inside the manual line sync dialog
+    // Completely process song, save to library, and display ready-to-sing dialog
+    async processAndReadySong(song, options = {}) {
+      if (!song) return;
+      openAutoSyncModal(song.title);
+      updateAutoSyncModalStatus('Iniciando sincronização automática…', 15);
+
+      const runSync = async (customText = null) => {
+        try {
+          const result = await this.autoSyncSong(song, {
+            ...options,
+            lyricsText: customText || options.lyricsText,
+            onProgress: (msg, pct) => updateAutoSyncModalStatus(msg, pct)
+          });
+
+          if (!result) return;
+
+          // If song needs plain lyrics input, prompt user inside modal
+          if (result.needsLyricsInput) {
+            showAutoSyncLyricsPrompt(text => runSync(text));
+            return;
+          }
+
+          // Build storage format and project voices
+          updateAutoSyncModalStatus('Gravando na biblioteca…', 92);
+          const selection = {
+            syncedLyrics: result.syncedLyrics,
+            plainLyrics: result.plainLyrics,
+            lyricTrack: song.title,
+            lyricArtist: song.artist || '',
+            lyricProvider: result.provider,
+            wordTimings: [],
+            lyricLineEnds: []
+          };
+
+          if (window.VoxStageLyrics) {
+            const lines = (typeof window.parseSyncedLyrics === 'function')
+              ? window.parseSyncedLyrics(result.syncedLyrics)
+              : [];
+            const incomingVoices = window.VoxStageLyrics.fromLegacy(
+              selection,
+              { lyricLines: lines },
+              window.lyricWordEntries || (t => window.VoxStageLyrics.wordEntries(t))
+            );
+            Object.assign(selection, window.VoxStageLyrics.storage(incomingVoices));
+          }
+
+          // Save to backend library.json
+          if (typeof window.api === 'function') {
+            const updated = { ...song, ...selection };
+            await window.api('/api/library', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(updated)
+            });
+            Object.assign(song, updated);
+          }
+
+          // Update current if this song is loaded
+          if (window.current && window.current.id === song.id) {
+            Object.assign(window.current, selection);
+            if (window.VoxStageLyrics && selection.lyricVoices) {
+              Object.assign(window.current, window.VoxStageLyrics.project(selection.lyricVoices));
+            }
+            if (typeof window.updateLyrics === 'function') {
+              window.updateLyrics(window.playbackPosition ? window.playbackPosition() : 0);
+            }
+          }
+
+          // Re-render library grid so the badge updates immediately to "Sincronizada"
+          if (typeof window.render === 'function') window.render();
+
+          // Show ready to sing state!
+          showAutoSyncReady(song, result.phrasesCount || 0);
+
+          if (typeof window.toast === 'function') {
+            window.toast(`“${song.title}” sincronizada com sucesso!`);
+          }
+        } catch (err) {
+          console.error('Falha ao sincronizar música:', err);
+          updateAutoSyncModalStatus(`Erro: ${err.message || err}`, 100);
+          if (typeof window.toast === 'function') window.toast(`Auto-Sync: ${err.message || err}`);
+        }
+      };
+
+      await runSync();
+    },
+
+    // Trigger auto-sync inside the manual line sync dialog (without requiring playback!)
     async triggerInManualSyncDialog() {
       const activeVoice = window.manualSyncFocus || 'lead';
       const editor = (typeof window.manualSyncEditor === 'function')
@@ -551,32 +780,31 @@
       const prevStatus = statusEl ? statusEl.innerHTML : '';
 
       try {
-        const currentSong = window.current;
-        if (!currentSong) {
-          if (typeof window.toast === 'function') window.toast('Toque a música primeiro e aguarde o áudio carregar.');
+        const targetSong = window.current || (window.songs && window.songs[0]);
+        if (!targetSong) {
+          if (typeof window.toast === 'function') window.toast('Escolha uma música primeiro.');
           return;
         }
 
-        const audioDuration = currentSong.duration || (currentSong.buffers?.Inst?.duration) || 0;
         let result = null;
 
         // If editor has lines, prioritize acoustic alignment of those exact lines with the vocal track!
         if (editorValue) {
-          if (statusEl) statusEl.textContent = '⚡ Analisando voz da música e calculando tempos…';
-          result = await this.autoSyncSong(currentSong, {
+          if (statusEl) statusEl.textContent = '⚡ Analisando voz da música em segundo plano…';
+          result = await this.autoSyncSong(targetSong, {
             forceLocal: true,
             lyricsText: editorValue,
-            onProgress: msg => { if (statusEl) statusEl.textContent = msg; }
+            onProgress: (msg) => { if (statusEl) statusEl.textContent = msg; }
           });
         } else {
           // If editor is empty, try online sync first
           if (statusEl) statusEl.textContent = '⚡ Buscando letra sincronizada online…';
-          result = await this.autoSyncSong(currentSong, {
-            onProgress: msg => { if (statusEl) statusEl.textContent = msg; }
+          result = await this.autoSyncSong(targetSong, {
+            onProgress: (msg) => { if (statusEl) statusEl.textContent = msg; }
           });
         }
 
-        if (!result) return;
+        if (!result || result.needsLyricsInput) return;
 
         // Update manualSyncVoices with newly computed times
         if (window.manualSyncVoices && window.VoxStageLyrics) {
@@ -585,7 +813,7 @@
             : [];
 
           const unified = (typeof window.unifiedLyricsForSong === 'function')
-            ? window.unifiedLyricsForSong({ ...currentSong, syncedLyrics: result.syncedLyrics, plainLyrics: result.plainLyrics })
+            ? window.unifiedLyricsForSong({ ...targetSong, syncedLyrics: result.syncedLyrics, plainLyrics: result.plainLyrics })
             : { lyricLines: lines };
 
           const incoming = window.VoxStageLyrics.fromLegacy(
@@ -609,13 +837,29 @@
           }
 
           if (statusEl) {
-            statusEl.innerHTML = `<span style="color:#74dbd3;font-weight:700;">✨ Sincronização automática concluída!</span><br><small style="color:#bbb;font-size:14px;">Os tempos foram aplicados às frases. Clique em “Salvar sync” ou ajuste conforme desejar.</small>`;
+            statusEl.innerHTML = `
+              <span style="color:#74dbd3;font-weight:700;">✨ Sincronização automática concluída!</span><br>
+              <span style="display:inline-flex;gap:8px;margin-top:8px;align-items:center;">
+                <button class="btn" id="manualSyncSingAction" type="button" style="background:#74dbd3;color:#111;font-weight:800;padding:6px 14px;font-size:12px;">▶ Cantar agora</button>
+                <small style="color:#bbb;font-size:13px;">ou clique em “Salvar sync”</small>
+              </span>
+            `;
+
+            const singBtn = document.getElementById('manualSyncSingAction');
+            if (singBtn) {
+              singBtn.onclick = async () => {
+                if (typeof window.saveManualSync === 'function') await window.saveManualSync();
+                const closeBtn = document.getElementById('closeManualSync');
+                if (closeBtn) closeBtn.click();
+                if (typeof window.playSong === 'function') await window.playSong(targetSong.id);
+              };
+            }
           }
 
           if (typeof window.toast === 'function') {
             window.toast(result.engine === 'online'
-              ? 'Letra sincronizada via catálogo LRCLIB! Clique em Salvar sync.'
-              : 'Letra alinhada automaticamente com os vocais da música! Clique em Salvar sync.');
+              ? 'Letra sincronizada via catálogo LRCLIB! Pronta para cantar.'
+              : 'Letra alinhada automaticamente com os vocais! Pronta para cantar.');
           }
         }
       } catch (err) {
@@ -632,60 +876,24 @@
 
     // Trigger auto-sync inside the lyrics search dialog
     async triggerInLyricsDialog() {
-      const currentSong = window.current;
-      if (!currentSong) {
-        if (typeof window.toast === 'function') window.toast('Toque uma música primeiro.');
+      const targetSong = window.current || (window.songs && window.songs[0]);
+      if (!targetSong) {
+        if (typeof window.toast === 'function') window.toast('Escolha uma música primeiro.');
         return;
       }
 
-      const btn = document.getElementById('lyricsDialogAutoSyncBtn');
-      if (btn) {
-        btn.disabled = true;
-        btn.innerHTML = '<span class="auto-sync-spinner">⏳</span> Sincronizando…';
-      }
+      const pasteInput = document.getElementById('lyricsPasteInput');
+      const customLyrics = pasteInput ? pasteInput.value.trim() : '';
 
-      const statusEl = document.getElementById('lyricsDialogStatus');
-      const prevStatus = statusEl ? statusEl.textContent : '';
-
-      try {
-        if (statusEl) statusEl.textContent = '⚡ Buscando sincronização precisa…';
-
-        const pasteInput = document.getElementById('lyricsPasteInput');
-        const customLyrics = pasteInput ? pasteInput.value.trim() : '';
-
-        const result = await this.autoSyncSong(currentSong, {
-          lyricsText: customLyrics || undefined,
-          onProgress: msg => { if (statusEl) statusEl.textContent = msg; }
-        });
-
-        if (!result) return;
-
-        // Apply to current song and library
-        if (typeof window.useLyricCandidate === 'function') {
-          await window.useLyricCandidate({
-            syncedLyrics: result.syncedLyrics,
-            plainLyrics: result.plainLyrics,
-            trackName: currentSong.title,
-            artistName: currentSong.artist,
-            lyricProvider: result.provider
-          }, 'current');
-
-          if (typeof window.toast === 'function') {
-            window.toast(`Letra sincronizada automaticamente (${result.engine === 'online' ? 'LRCLIB' : 'Alinhador Acústico'})!`);
-          }
-        }
-      } catch (err) {
-        console.error('Falha no auto-sync na janela de letras:', err);
-        if (statusEl) statusEl.textContent = prevStatus;
-        if (typeof window.toast === 'function') window.toast(`Auto-Sync: ${err.message || err}`);
-      } finally {
-        if (btn) {
-          btn.disabled = false;
-          btn.innerHTML = '<span class="auto-sync-icon">⚡</span> Sincronizar Automaticamente';
-        }
-      }
+      closeLyricsDialogFallback();
+      await this.processAndReadySong(targetSong, { lyricsText: customLyrics || undefined });
     }
   };
+
+  function closeLyricsDialogFallback() {
+    const dialog = document.getElementById('lyricsDialog');
+    if (dialog) dialog.classList.remove('show');
+  }
 
   window.VoxStageAutoSync = AutoSyncManager;
 
@@ -756,6 +964,172 @@
           0% { transform: rotate(0deg); }
           100% { transform: rotate(360deg); }
         }
+
+        /* Auto-Sync Dedicated Modal */
+        .auto-sync-modal-overlay {
+          position: fixed;
+          inset: 0;
+          z-index: 99999;
+          display: none;
+          place-items: center;
+          padding: 16px;
+          background: rgba(6, 7, 9, 0.88);
+          backdrop-filter: blur(12px);
+        }
+        .auto-sync-modal-overlay.show {
+          display: grid;
+        }
+        .auto-sync-card {
+          box-sizing: border-box;
+          width: min(520px, 94vw);
+          max-height: 88dvh;
+          overflow: auto;
+          padding: 22px 24px;
+          border: 1px solid #36373e;
+          border-radius: 20px;
+          background: #18191d;
+          box-shadow: 0 20px 70px rgba(0, 0, 0, 0.8);
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+          animation: autoSyncScaleIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes autoSyncScaleIn {
+          from { transform: scale(0.95); opacity: 0; }
+          to { transform: scale(1); opacity: 1; }
+        }
+        .auto-sync-head {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 12px;
+          border-bottom: 1px solid #28292f;
+          padding-bottom: 12px;
+        }
+        .auto-sync-kicker {
+          font-size: 10px;
+          letter-spacing: 1.5px;
+          font-weight: 800;
+          color: #74dbd3;
+          text-transform: uppercase;
+        }
+        .auto-sync-head h2 {
+          font-size: 18px;
+          margin: 4px 0 0;
+          color: #fff;
+          font-weight: 700;
+        }
+        .auto-sync-close-btn {
+          background: transparent;
+          color: #888;
+          font-size: 24px;
+          line-height: 1;
+          padding: 4px;
+          cursor: pointer;
+        }
+        .auto-sync-close-btn:hover {
+          color: #fff;
+        }
+        .auto-sync-body {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          text-align: center;
+          gap: 12px;
+          padding: 10px 0;
+        }
+        .auto-sync-icon-pulse {
+          font-size: 34px;
+          color: #74dbd3;
+          animation: autoSyncPulse 1.4s ease-in-out infinite;
+        }
+        @keyframes autoSyncPulse {
+          0%, 100% { transform: scale(1); filter: drop-shadow(0 0 4px #74dbd3); }
+          50% { transform: scale(1.15); filter: drop-shadow(0 0 14px #74dbd3); }
+        }
+        .auto-sync-status-msg {
+          font-size: 14px;
+          font-weight: 600;
+          color: #e5e5ea;
+        }
+        .auto-sync-bar-wrap {
+          width: 100%;
+          height: 6px;
+          background: #25262c;
+          border-radius: 6px;
+          overflow: hidden;
+          margin-top: 4px;
+        }
+        .auto-sync-bar-fill {
+          height: 100%;
+          background: linear-gradient(90deg, #74dbd3, #a2f2eb);
+          border-radius: 6px;
+          transition: width 0.3s ease;
+        }
+        .auto-sync-prompt-copy {
+          font-size: 13px;
+          color: #c7c7cf;
+          line-height: 1.5;
+          margin: 0;
+          text-align: left;
+          width: 100%;
+        }
+        #autoSyncPromptText {
+          width: 100%;
+          box-sizing: border-box;
+          background: #111215;
+          border: 1px solid #383941;
+          border-radius: 12px;
+          color: #eee;
+          padding: 12px;
+          font-size: 13px;
+          line-height: 1.5;
+          resize: vertical;
+          font-family: inherit;
+        }
+        #autoSyncPromptText:focus {
+          outline: none;
+          border-color: #74dbd3;
+        }
+        .auto-sync-prompt-submit {
+          width: 100%;
+          justify-content: center;
+          background: #74dbd3;
+          color: #111;
+          font-weight: 800;
+          min-height: 42px;
+        }
+        .auto-sync-success-badge {
+          font-size: 38px;
+        }
+        .auto-sync-ready-heading {
+          font-size: 19px;
+          color: #74dbd3;
+          margin: 0;
+          font-weight: 800;
+        }
+        .auto-sync-ready-copy {
+          font-size: 13px;
+          color: #c7c7cf;
+          line-height: 1.5;
+          margin: 0;
+        }
+        .auto-sync-actions {
+          display: flex;
+          gap: 10px;
+          justify-content: center;
+          width: 100%;
+          margin-top: 8px;
+        }
+        .auto-sync-sing-action {
+          flex: 1;
+          justify-content: center;
+          background: #74dbd3;
+          color: #111;
+          font-weight: 800;
+          font-size: 14px;
+          min-height: 44px;
+        }
       `;
       document.head.append(style);
     }
@@ -771,7 +1145,7 @@
         autoBtn.className = 'btn secondary auto-sync-btn';
         autoBtn.type = 'button';
         autoBtn.innerHTML = '<span class="auto-sync-icon">⚡</span> Auto-Sincronizar';
-        autoBtn.title = 'Alinha automaticamente a letra com os vocais da música usando IA acústica ou banco de dados';
+        autoBtn.title = 'Alinha automaticamente a letra com os vocais da música sem precisar esperar tocar';
         autoBtn.onclick = () => AutoSyncManager.triggerInManualSyncDialog();
 
         // Place right beside "Começar do início"
@@ -792,7 +1166,7 @@
             <span class="auto-sync-icon">⚡</span> Sincronizar Automaticamente
           </button>
           <span class="lyrics-auto-sync-hint">
-            Busca tempos exatos no catálogo LRCLIB ou alinha o texto diretamente com a faixa de voz da música.
+            Busca tempos no catálogo LRCLIB ou decodifica a faixa vocal em segundo plano para alinhar com a voz do cantor.
           </span>
         `;
         searchRow.after(box);
@@ -812,37 +1186,11 @@
         const song = (window.songs || []).find(s => s.id === songId);
         if (!song) return;
 
-        if (typeof window.toast === 'function') {
-          window.toast(`⚡ Sincronizando “${song.title}”…`);
-        }
+        // Close any open menus
+        document.querySelectorAll('.track-menu').forEach(m => m.hidden = true);
 
-        try {
-          const result = await AutoSyncManager.autoSyncSong(song);
-          if (result && typeof window.api === 'function') {
-            const updated = {
-              ...song,
-              syncedLyrics: result.syncedLyrics,
-              plainLyrics: result.plainLyrics,
-              lyricProvider: result.provider
-            };
-            await window.api('/api/library', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(updated)
-            });
-            Object.assign(song, updated);
-            if (window.current && window.current.id === song.id) {
-              Object.assign(window.current, updated);
-              if (typeof window.updateLyrics === 'function') window.updateLyrics(window.playbackPosition());
-            }
-            if (typeof window.toast === 'function') {
-              window.toast(`“${song.title}” sincronizada com sucesso!`);
-            }
-          }
-        } catch (err) {
-          console.error(err);
-          if (typeof window.toast === 'function') window.toast(`Erro ao sincronizar: ${err.message || err}`);
-        }
+        // Run full background process & show ready-to-sing modal
+        await AutoSyncManager.processAndReadySong(song);
       }
     });
   }
