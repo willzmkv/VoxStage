@@ -1,5 +1,21 @@
 # Changelog
 
+## Novidades da 2.1.0
+
+- **Sincronização Automática com IA Local (Whisper AI)**:
+  - Alinhamento automático inteligente de letras com precisão no nível de palavras (*word-level timing*), sem depender do MVSEP e 100% offline.
+  - Modelo Whisper neural integrado localmente com resolução acústica fonema por fonema.
+  - Barra de progresso visual em tempo real integrada à interface com estilo monocromático nativo.
+  - Suporte completo a músicas personalizadas, geradas por IA (Suno, Udio) ou sem correspondência no catálogo online.
+- **Retorno de Voz em Tempo Real com Efeitos de Estúdio**:
+  - Novo recurso de monitoramento vocal para ouvir a própria voz ao cantar.
+  - Processador de áudio com Reverb de estúdio (convolução estéreo), Delay/Eco sutil e presença vocal (equalização paramétrica e compressão).
+  - Controle de volume independente do microfone e botão de alternância rápida na HUD do palco.
+- **Correções Críticas**:
+  - Correção do travamento de mouse no Windows em tela cheia na sincronização manual.
+  - Correção na resolução de URLs de mídia para evitar erros de leitura de áudio.
+  - Resolução definitiva de erros de propriedades indefinidas de tempos de versos no reprodutor.
+
 ## Novidades da 2.0
 
 - Interface renovada para cada plataforma: biblioteca e fila lateral no PC, navegação inferior no Android e menus adaptados ao controle remoto na TV. Adição de músicas guiada, configurações reorganizadas e pareamento com mais espaço.
