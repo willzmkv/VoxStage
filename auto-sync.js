@@ -468,32 +468,44 @@
 
   // --- Background Audio Decoding (Without starting playback) ---
 
+  function resolveMediaUrl(name) {
+    if (!name) return '';
+    if (typeof mediaUrl === 'function') return mediaUrl(name);
+    if (typeof window.mediaUrl === 'function') return window.mediaUrl(name);
+    if (typeof mobileNative !== 'undefined' && mobileNative && typeof mobileMusicDirectory !== 'undefined' && window.__TAURI__?.core?.convertFileSrc) {
+      const path = `${mobileMusicDirectory.replace(/[\\/]$/, '')}/${name}`;
+      return window.__TAURI__.core.convertFileSrc(path);
+    }
+    return `/music/${encodeURIComponent(name)}`;
+  }
+
   async function resolveAudioBufferForSong(song) {
     if (!song) return null;
     if (song.buffers?.Lead) return { buffer: song.buffers.Lead, isIsolated: true };
-    if (song.buffers?.Inst) return { buffer: song.buffers.Inst, isIsolated: false };
+    if (song.buffers?.Inst && !song.lead) return { buffer: song.buffers.Inst, isIsolated: false };
 
-    const stem = song.lead || song.inst || song.source;
+    // Prioritize vocal lead stem for accurate vocal activity and melody sync!
+    const stem = song.lead || song.source || song.inst;
     if (!stem) return null;
 
     const ctx = (typeof window.audioContext !== 'undefined' && window.audioContext)
       ? window.audioContext
       : new (window.AudioContext || window.webkitAudioContext)();
 
-    const mediaUrlFn = window.mediaUrl || (name => `/api/remote/media/${name}`);
-    const url = mediaUrlFn(stem);
+    const url = resolveMediaUrl(stem);
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Falha ao ler áudio (${response.status})`);
     const arrayBuffer = await response.arrayBuffer();
     const decoded = await ctx.decodeAudioData(arrayBuffer);
 
     if (!song.buffers) song.buffers = {};
-    if (song.lead && stem === song.lead) {
+    const isIsolated = Boolean(song.lead && stem === song.lead);
+    if (isIsolated) {
       song.buffers.Lead = decoded;
     } else {
       song.buffers.Inst = decoded;
     }
-    return { buffer: decoded, isIsolated: Boolean(song.lead && stem === song.lead) };
+    return { buffer: decoded, isIsolated };
   }
 
   // --- Dedicated Progress Modal with Real Visual Progress Bar ---

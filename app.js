@@ -113,6 +113,7 @@ const mediaUrl = name => {
   }
   return `/music/${encodeURIComponent(name)}`;
 };
+window.mediaUrl = mediaUrl;
 const extension = name => (name.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'bin';
 
 // A text selection can finish over a dialog backdrop (or the sync stage).
