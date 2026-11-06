@@ -29,13 +29,24 @@ def get_whisper_model():
     with _model_lock:
         if _model is None:
             from faster_whisper import WhisperModel
-            # Try 'base' for superior word boundary resolution; fallback to 'tiny'
-            try:
-                _model = WhisperModel("base", device="cpu", compute_type="int8")
-                _model_name = "base"
-            except Exception:
-                _model = WhisperModel("tiny", device="cpu", compute_type="int8")
-                _model_name = "tiny"
+            models_dir = Path(__file__).resolve().parent / "models"
+            local_base = models_dir / "whisper-base"
+            local_tiny = models_dir / "whisper-tiny"
+
+            if local_base.is_dir() and (local_base / "model.bin").is_file():
+                _model = WhisperModel(str(local_base), device="cpu", compute_type="int8", local_files_only=True)
+                _model_name = "base (bundled)"
+            elif local_tiny.is_dir() and (local_tiny / "model.bin").is_file():
+                _model = WhisperModel(str(local_tiny), device="cpu", compute_type="int8", local_files_only=True)
+                _model_name = "tiny (bundled)"
+            else:
+                # Try 'base' for superior word boundary resolution; fallback to 'tiny'
+                try:
+                    _model = WhisperModel("base", device="cpu", compute_type="int8")
+                    _model_name = "base"
+                except Exception:
+                    _model = WhisperModel("tiny", device="cpu", compute_type="int8")
+                    _model_name = "tiny"
         return _model
 
 
