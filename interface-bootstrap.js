@@ -15,7 +15,7 @@
     const format=localStorage.getItem('voxstage-debug-format');
     if(debug&&['pc','tv','phone'].includes(format))window.VoxStageInterfaceFormat=format;
   } catch {}
-  const scripts=['app.js?v=2.0.0','audio/pitch-core.js?v=1.1.1','microphone-input.js?v=1.1.1','scoring.js?v=1.1.1','phone-microphone.js?v=1.1.1','onboarding.js?v=1.0.2','android-tv.js?v=2.0.0','menu-shell.js?v=2.0.0','menu-pages.js?v=2.0.0','stage-shell.js?v=2.0.0'];
+  const scripts=['app.js?v=2.0.0','audio/pitch-core.js?v=1.1.1','microphone-input.js?v=1.1.1','vocal-fx.js?v=2.0.0','scoring.js?v=1.1.1','phone-microphone.js?v=1.1.1','onboarding.js?v=1.0.2','android-tv.js?v=2.0.0','menu-shell.js?v=2.0.0','menu-pages.js?v=2.0.0','stage-shell.js?v=2.0.0'];
   for(const source of scripts)await new Promise((resolve,reject)=>{
     const script=document.createElement('script');script.src=source;script.onload=resolve;script.onerror=()=>reject(new Error(`Não consegui carregar ${source}`));document.body.append(script);
   });

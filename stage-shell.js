@@ -6,7 +6,7 @@
   const txt=(pt,english)=>{englishUiCopy[pt]=english;return en()?english:pt;};
   const css=document.createElement('link');css.rel='stylesheet';css.href='stage-shell.css?v=2.0.0';document.head.append(css);
   stage.classList.add('palco-livre');stage.dataset.stageDevice=device;
-  const paths={more:'M5 12h.01M12 12h.01M19 12h.01',close:'m6 6 12 12M18 6 6 18',hide:'m3 3 18 18M10 5a12 12 0 0 1 11 7 14 14 0 0 1-4 5M6 6a14 14 0 0 0-3 6 12 12 0 0 0 12 7M10 10a3 3 0 0 0 4 4',show:'M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7Zm10-3a3 3 0 1 0 0 6 3 3 0 0 0 0-6',speed:'M4 18a10 10 0 1 1 16 0M12 13l5-6M5 18h14',mic:'M9 4a3 3 0 0 1 6 0v8a3 3 0 0 1-6 0Zm-3 7v1a6 6 0 0 0 12 0v-1M12 18v4M8 22h8',back:'m14 6-6 6 6 6M8 12h13',sync:'M3 5h17M3 10h8M3 15h8M17 13v3l2 1'};
+  const paths={more:'M5 12h.01M12 12h.01M19 12h.01',close:'m6 6 12 12M18 6 6 18',hide:'m3 3 18 18M10 5a12 12 0 0 1 11 7 14 14 0 0 1-4 5M6 6a14 14 0 0 0-3 6 12 12 0 0 0 12 7M10 10a3 3 0 0 0 4 4',show:'M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7Zm10-3a3 3 0 1 0 0 6 3 3 0 0 0 0-6',speed:'M4 18a10 10 0 1 1 16 0M12 13l5-6M5 18h14',mic:'M9 4a3 3 0 0 1 6 0v8a3 3 0 0 1-6 0Zm-3 7v1a6 6 0 0 0 12 0v-1M12 18v4M8 22h8',back:'m14 6-6 6 6 6M8 12h13',sync:'M3 5h17M3 10h8M3 15h8M17 13v3l2 1',vocal:'M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Zm-5 9a5 5 0 0 0 10 0M12 18v4M8 22h8M19 8a5 5 0 0 1 0 6M5 8a5 5 0 0 0 0 6'};
   function svg(name){if(!paths[name])return playbackControlSvg(name);return `<svg class="playback-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${paths[name]}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>${name==='sync'?'<circle cx="17" cy="16" r="5" fill="none" stroke="currentColor" stroke-width="1.8"/>':''}</svg>`;}
   function paint(button,name,label='',accessible=label){
     if(!button)return;
@@ -51,6 +51,16 @@
   function paintSync(){paint(sync,'sync','Sync',txt('Sincronizar letra','Synchronize lyrics'));}
   const oldSyncUi=updateSyncEngineUi;updateSyncEngineUi=function(){oldSyncUi();paintSync();};paintSync();
   paint(score,'mic',txt('Pontuar','Score'));
+  const vocalFxBtn=document.createElement('button');
+  vocalFxBtn.id='stageVocalFx';vocalFxBtn.type='button';vocalFxBtn.className='hud-btn vocal-fx-btn';
+  function paintVocalFx(){
+    const running=Boolean(window.VoxStageVocalMonitor?.isRunning);
+    vocalFxBtn.classList.toggle('active',running);
+    paint(vocalFxBtn,'vocal',running?txt('Voz On','Voice On'):txt('Voz','Vocal'),txt('Retorno e efeitos de voz','Voice return and vocal effects'));
+  }
+  paintVocalFx();
+  vocalFxBtn.onclick=()=>window.VoxStageVocalMonitor?.openDialog();
+  window.addEventListener('voxstage-vocal-monitor-state',paintVocalFx);
   const oldTransformUi=updatePlaybackTransformControls;
   updatePlaybackTransformControls=function(){oldTransformUi();const b=stage.querySelector('[data-speed-open]');if(b){const label=b.textContent;paint(b,'speed',label,txt('Ajustar velocidade e tom','Adjust speed and pitch'));}};
   updatePlaybackTransformControls();
@@ -59,15 +69,15 @@
   if(mix)paint(mix,'mix','Mix',txt('Volumes e palavra por palavra','Volumes and word highlighting'));
   settingsRow.classList.add('palco-mix');settingsRow.setAttribute('aria-label',txt('Volumes e aparência','Volumes and appearance'));
   if(!settingsRow.id)settingsRow.id='stageMixPanel';mix?.setAttribute('aria-controls',settingsRow.id);
-  if(pc){left.append(lyrics,sync);right.append(score,pitchPanel);}
-  else{left.append(mix);right.append(pitchPanel,score);}
+  if(pc){left.append(lyrics,sync);right.append(vocalFxBtn,score,pitchPanel);}
+  else{left.append(mix);right.append(vocalFxBtn,pitchPanel,score);}
   panel.replaceChildren(progress,controls,settingsRow);
   const moreMenu=group('palco-more-menu');moreMenu.id='stageMoreMenu';moreMenu.setAttribute('popover','auto');moreMenu.setAttribute('role','dialog');moreMenu.setAttribute('aria-label',txt('Opções do palco','Stage options'));stage.append(moreMenu);
   let more=null;
   if(!pc){
     more=document.createElement('button');more.id='stageMoreOpen';more.type='button';more.className='hud-btn';more.setAttribute('aria-controls',moreMenu.id);more.setAttribute('aria-expanded','false');paint(more,'more','',txt('Mais opções','More options'));
     headerActions.replaceChildren(...(tv?[lyrics]:[]),more,quickExit);
-    if(!tv)moreMenu.append(lyrics);moreMenu.append(sync,hide);if($('mobileStageMode'))moreMenu.append($('mobileStageMode'));
+    if(!tv)moreMenu.append(lyrics);moreMenu.append(sync,vocalFxBtn,hide);if($('mobileStageMode'))moreMenu.append($('mobileStageMode'));
     more.onclick=()=>{
       if(moreOpen()){closeMore();return;}
       closeMix();const anchor=more.getBoundingClientRect(),width=Math.min(280,innerWidth-24);
