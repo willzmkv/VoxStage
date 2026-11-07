@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import traceback
+from pathlib import Path
 
 # Ensure Windows finds bundled MSVC C++ runtime and ctranslate2 DLLs
 if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
@@ -32,7 +33,6 @@ if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
             except OSError:
                 pass
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import quote, urlencode, unquote, urlparse, parse_qs
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
