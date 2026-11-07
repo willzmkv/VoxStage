@@ -83,6 +83,16 @@ REMOTE_SONG_FIELDS = ARCHIVE_SONG_FIELDS
 REMOTE_INCOMING = DATA_ROOT / ".remote-incoming"
 REMOTE_INCOMING.mkdir(exist_ok=True)
 
+webrtc_session = {
+    "active": False,
+    "offer": None,
+    "answer": None,
+    "phone_candidates": [],
+    "host_candidates": [],
+    "updated": 0.0
+}
+webrtc_lock = threading.Lock()
+
 
 def get_lan_ipv4():
     """Find the local Wi-Fi/Ethernet address used to reach other devices."""
@@ -948,7 +958,36 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._is_loopback():
                 return self.send_error(403)
             address = get_lan_ipv4()
-            return self.send_json({"address": address, "token": REMOTE_TOKEN, "url": f"http://{address}:{self.server.server_port}/remote#{REMOTE_TOKEN}" if address else ""})
+            return self.send_json({
+                "address": address,
+                "token": REMOTE_TOKEN,
+                "url": f"http://{address}:{self.server.server_port}/remote#{REMOTE_TOKEN}" if address else "",
+                "httpsUrl": f"https://{address}:8443/remote#{REMOTE_TOKEN}" if address else ""
+            })
+        if path == "/api/remote/webrtc/session":
+            with webrtc_lock:
+                return self.send_json({
+                    "active": webrtc_session["active"],
+                    "hasOffer": webrtc_session["offer"] is not None,
+                    "hasAnswer": webrtc_session["answer"] is not None,
+                    "updated": webrtc_session["updated"]
+                })
+        if path == "/api/remote/webrtc/offer":
+            if not self._is_loopback():
+                return self.send_error(403)
+            with webrtc_lock:
+                return self.send_json({
+                    "offer": webrtc_session["offer"],
+                    "candidates": list(webrtc_session["phone_candidates"])
+                })
+        if path == "/api/remote/webrtc/answer":
+            if not self._require_remote_token():
+                return
+            with webrtc_lock:
+                return self.send_json({
+                    "answer": webrtc_session["answer"],
+                    "candidates": list(webrtc_session["host_candidates"])
+                })
         if path == "/api/remote/library":
             if not self._require_remote_token():
                 return
@@ -1324,6 +1363,58 @@ class Handler(SimpleHTTPRequestHandler):
             with remote_commands_lock:
                 remote_commands.clear()
             return self.send_json({"rotated": True})
+        if parsed_path == "/api/remote/webrtc/offer":
+            if not self._require_remote_token():
+                return
+            try:
+                body = self._read_remote_json()
+                with webrtc_lock:
+                    webrtc_session["active"] = True
+                    webrtc_session["offer"] = body.get("offer")
+                    webrtc_session["answer"] = None
+                    webrtc_session["host_candidates"] = []
+                    webrtc_session["phone_candidates"] = body.get("candidates", [])
+                    webrtc_session["updated"] = time.time()
+                return self.send_json({"ok": True})
+            except Exception as e:
+                return self.send_json({"error": str(e)}, 400)
+        if parsed_path == "/api/remote/webrtc/answer":
+            if not self._is_loopback():
+                return self.send_error(403)
+            try:
+                body = self._read_remote_json()
+                with webrtc_lock:
+                    webrtc_session["answer"] = body.get("answer")
+                    if "candidates" in body:
+                        webrtc_session["host_candidates"].extend(body.get("candidates", []))
+                    webrtc_session["updated"] = time.time()
+                return self.send_json({"ok": True})
+            except Exception as e:
+                return self.send_json({"error": str(e)}, 400)
+        if parsed_path == "/api/remote/webrtc/candidate":
+            try:
+                body = self._read_remote_json()
+                role = body.get("role", "phone")
+                candidate = body.get("candidate")
+                if candidate:
+                    with webrtc_lock:
+                        if role == "phone":
+                            webrtc_session["phone_candidates"].append(candidate)
+                        else:
+                            webrtc_session["host_candidates"].append(candidate)
+                        webrtc_session["updated"] = time.time()
+                return self.send_json({"ok": True})
+            except Exception as e:
+                return self.send_json({"error": str(e)}, 400)
+        if parsed_path == "/api/remote/webrtc/reset":
+            with webrtc_lock:
+                webrtc_session["active"] = False
+                webrtc_session["offer"] = None
+                webrtc_session["answer"] = None
+                webrtc_session["phone_candidates"] = []
+                webrtc_session["host_candidates"] = []
+                webrtc_session["updated"] = time.time()
+            return self.send_json({"ok": True})
         if parsed_path == "/api/remote/control":
             if not self._require_remote_token():
                 return
@@ -1620,6 +1711,28 @@ def watch_desktop_parent(httpd):
     threading.Thread(target=watch, name="desktop-parent-watch", daemon=True).start()
 
 
+def start_https_server_thread(bind_host: str, https_port: int = 8443):
+    cert_path = ROOT / "cert.pem"
+    key_path = ROOT / "key.pem"
+    if not (cert_path.is_file() and key_path.is_file()):
+        return None
+    try:
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(cert_path), str(key_path))
+        httpsd = ThreadingHTTPServer((bind_host, https_port), Handler)
+        httpsd.socket = ctx.wrap_socket(httpsd.socket, server_side=True)
+        t = threading.Thread(target=httpsd.serve_forever, daemon=True, name="https-server")
+        t.start()
+        lan = get_lan_ipv4()
+        if lan:
+            print(f"VoxStage HTTPS (Microfone Celular Seguro) em https://{lan}:{https_port}/remote")
+        return httpsd
+    except Exception as e:
+        logger.warning("HTTPS server opcional não iniciado: %s", e)
+        return None
+
+
 if __name__ == "__main__":
     host = os.environ.get("VOXSTAGE_HOST", "0.0.0.0")
     try:
@@ -1629,6 +1742,7 @@ if __name__ == "__main__":
     address = (host, port)
     lan_url = f"http://{get_lan_ipv4()}:{port}/remote" if host in {"0.0.0.0", ""} else ""
     print(f"VoxStage em http://localhost:{port}" + (f" (celular na mesma rede: {lan_url})" if lan_url else ""))
+    start_https_server_thread(host, 8443)
     try:
         with ThreadingHTTPServer(address, Handler) as httpd:
             watch_desktop_parent(httpd)

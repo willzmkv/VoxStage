@@ -112,7 +112,7 @@
     return null;
   }
 
-  async function startMonitoring() {
+  async function startMonitoring(customStream = null) {
     if (isRunning) return true;
 
     // Ensure audio engine
@@ -129,32 +129,36 @@
       try { await ctx.resume(); } catch {}
     }
 
-    try {
-      const constraints = {
-        audio: {
-          deviceId: settings.deviceId ? { exact: settings.deviceId } : undefined,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          latency: 0
-        },
-        video: false
-      };
+    if (customStream) {
+      activeStream = customStream;
+    } else {
+      try {
+        const constraints = {
+          audio: {
+            deviceId: settings.deviceId ? { exact: settings.deviceId } : undefined,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            latency: 0
+          },
+          video: false
+        };
 
-      activeStream = await navigator.mediaDevices.getUserMedia(constraints);
-    } catch (err) {
-      console.warn('[VocalMonitor] Falha ao capturar microfone:', err);
-      // Fallback without device constraint if specific device failed
-      if (settings.deviceId) {
-        try {
-          activeStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        } catch (e) {
+        activeStream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err) {
+        console.warn('[VocalMonitor] Falha ao capturar microfone:', err);
+        // Fallback without device constraint if specific device failed
+        if (settings.deviceId) {
+          try {
+            activeStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          } catch (e) {
+            if (typeof toast === 'function') toast('Não foi possível acessar o microfone. Verifique as permissões.');
+            return false;
+          }
+        } else {
           if (typeof toast === 'function') toast('Não foi possível acessar o microfone. Verifique as permissões.');
           return false;
         }
-      } else {
-        if (typeof toast === 'function') toast('Não foi possível acessar o microfone. Verifique as permissões.');
-        return false;
       }
     }
 
@@ -642,6 +646,10 @@
     get settings() { return { ...settings }; },
     getVolume: () => settings.volume,
     start: startMonitoring,
+    connectRemoteStream: async (stream) => {
+      if (isRunning) stopMonitoring();
+      return await startMonitoring(stream);
+    },
     stop: stopMonitoring,
     toggle: async () => {
       if (isRunning) { stopMonitoring(); return false; }

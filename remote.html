@@ -13,6 +13,26 @@
   <header><div class="brand">VOXSTAGE · REMOTE</div><h1>Controle do palco</h1><div class="connection" id="connection"><i class="dot"></i><span>Conectando ao host…</span></div></header>
   <div id="app" hidden>
     <section class="panel"><div class="now"><strong id="nowTitle">Nenhuma música tocando</strong><span id="nowArtist">Conecte ao VoxStage do PC ou da TV</span></div><div class="transport"><button id="previous" aria-label="Música anterior">⏮</button><button id="playPause" class="main" aria-label="Tocar">▶</button><button id="next" aria-label="Próxima música">⏭</button></div><div id="controlStatus" class="status"></div></section>
+    <section class="panel" id="micPanel">
+      <div class="section-head">
+        <h2>🎤 Microfone do Celular</h2>
+        <span id="micBadge" style="font-size:10px;font-weight:700;padding:4px 9px;border-radius:12px;background:#252529;color:#9a9a9f">Desligado</span>
+      </div>
+      <p class="muted" style="margin:4px 0 12px;font-size:12px">Use este celular como microfone sem fio ao vivo, transmitindo para o som do palco e retorno de efeitos.</p>
+      <div id="micHttpsPrompt" hidden style="padding:10px 12px;border-radius:10px;background:#2d2417;border:1px solid #634d28;color:#ffd899;font-size:11px;margin-bottom:12px;line-height:1.4">
+        ⚠️ Navegadores exigem conexão segura HTTPS para liberar o microfone.<br>
+        <a id="micHttpsLink" href="#" style="color:#d4fb69;font-weight:700;text-decoration:underline">Toque aqui para abrir com HTTPS</a>.
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <button id="toggleMicBtn" class="btn" style="min-height:48px;font-size:15px;display:flex;align-items:center;justify-content:center;gap:8px">
+          <span>🎤 Ligar Microfone</span>
+        </button>
+      </div>
+      <div id="micLevelContainer" style="margin-top:12px;height:8px;background:#131316;border-radius:6px;overflow:hidden;border:1px solid #333;display:none">
+        <div id="micLevelBar" style="width:0%;height:100%;background:var(--lime);transition:width 0.08s ease"></div>
+      </div>
+      <div id="micStatus" class="status" style="margin-top:8px"></div>
+    </section>
     <section class="panel"><div class="section-head"><h2>Pedir uma música da biblioteca</h2></div><input id="songSearch" class="field" placeholder="Filtrar músicas"><div id="songList" class="song-list" style="margin-top:9px"></div></section>
     <section class="panel"><div class="section-head"><h2>Pedir outra música</h2></div><div class="request-form"><input id="newTitle" class="field" placeholder="Nome da música"><input id="newArtist" class="field" placeholder="Artista (opcional)"><button id="newRequest" class="btn">Enviar pedido ao host</button></div><div id="requestStatus" class="status" aria-live="polite"></div></section>
     <section class="panel" id="tvMvsepPanel" hidden><div class="section-head"><h2 id="tvMvsepHeading">Chave MVSEP na Google TV</h2></div><p id="tvMvsepCopy" class="muted">Cole a chave MVSEP para salvá-la na TV conectada.</p><input id="tvMvsepKey" class="field" type="password" autocomplete="new-password" placeholder="Chave da API MVSEP"><button id="sendTvMvsep" class="btn" style="margin-top:10px">Enviar chave para a TV</button><div id="tvMvsepStatus" class="status" aria-live="polite"></div></section>
@@ -34,5 +54,145 @@ async function init(){token=location.hash.slice(1)||sessionStorage.getItem('voxs
 $('previous').onclick=()=>command('previous');$('next').onclick=()=>command('next');$('playPause').onclick=()=>command(state?.playing?'pause':'play');$('newRequest').onclick=()=>{const title=$('newTitle').value.trim();if(!title){$('requestStatus').textContent='Digite o nome da música.';return}requestSong({title,artist:$('newArtist').value.trim()});$('newTitle').value=''};$('songSearch').oninput=renderSongs;
 if(english){$('tvMvsepHeading').textContent='MVSEP key on Google TV';$('tvMvsepCopy').textContent='Paste your MVSEP key to save it on the connected TV.';$('tvMvsepKey').placeholder='MVSEP API key';$('sendTvMvsep').textContent='Send key to TV'}
 $('sendTvMvsep').onclick=async()=>{const key=$('tvMvsepKey').value.trim();if(!key){$('tvMvsepStatus').textContent=english?'Paste your key first.':'Cole sua chave antes de enviar.';return}$('sendTvMvsep').disabled=true;$('tvMvsepStatus').textContent=english?'Sending key…':'Enviando chave…';try{await api('/api/remote/mvsep/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:key})});$('tvMvsepKey').value='';$('tvMvsepStatus').textContent=english?'Key saved on the TV.':'Chave salva na TV.'}catch(error){$('tvMvsepStatus').textContent=error.message}finally{$('sendTvMvsep').disabled=false}};
+
+let micStream = null, micPeer = null, micAudioCtx = null, micLevelTimer = null, micPollingTimer = null;
+async function startPhoneMicrophone() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    if (!window.isSecureContext) {
+      $('micHttpsPrompt').hidden = false;
+      const hostIp = location.hostname;
+      $('micHttpsLink').href = `https://${hostIp}:8443/remote#${token}`;
+    }
+    throw new Error('Navegador bloqueou acesso ao microfone. Abra via HTTPS seguro.');
+  }
+
+  $('micBadge').textContent = 'Conectando...';
+  $('micBadge').style.background = '#3a331c';
+  $('micBadge').style.color = '#e2ba55';
+  $('micStatus').textContent = 'Obtendo microfone…';
+
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, latency: 0 },
+    video: false
+  });
+
+  try {
+    micAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const sourceNode = micAudioCtx.createMediaStreamSource(micStream);
+    const analyser = micAudioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    sourceNode.connect(analyser);
+    const pcmData = new Uint8Array(analyser.frequencyBinCount);
+    $('micLevelContainer').style.display = 'block';
+    micLevelTimer = setInterval(() => {
+      analyser.getByteFrequencyData(pcmData);
+      let sum = 0;
+      for (let i = 0; i < pcmData.length; i++) sum += pcmData[i];
+      const avg = sum / pcmData.length;
+      const pct = Math.min(100, Math.round((avg / 128) * 100));
+      $('micLevelBar').style.width = `${pct}%`;
+      if (pct > 75) $('micLevelBar').style.background = '#ff5555';
+      else if (pct > 40) $('micLevelBar').style.background = '#f5c842';
+      else $('micLevelBar').style.background = 'var(--lime)';
+    }, 60);
+  } catch (e) {
+    console.warn('Level meter indisponível:', e);
+  }
+
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  micPeer = pc;
+
+  micStream.getAudioTracks().forEach(track => pc.addTrack(track, micStream));
+
+  const candidates = [];
+  pc.onicecandidate = event => {
+    if (event.candidate) {
+      candidates.push(event.candidate.toJSON());
+      void api('/api/remote/webrtc/candidate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: 'phone', candidate: event.candidate.toJSON() })
+      }).catch(() => {});
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'connected') {
+      $('micBadge').textContent = 'AO VIVO';
+      $('micBadge').style.background = '#25441e';
+      $('micBadge').style.color = 'var(--lime)';
+      $('micStatus').textContent = 'Voz transmitida ao vivo para o VoxStage!';
+      $('toggleMicBtn').classList.add('secondary');
+      $('toggleMicBtn').innerHTML = '<span>⏹ Desligar Microfone</span>';
+    } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+      stopPhoneMicrophone('Conexão de microfone perdida.');
+    }
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  await api('/api/remote/webrtc/offer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ offer: { sdp: offer.sdp, type: offer.type }, candidates })
+  });
+
+  let answerReceived = false, attempts = 0;
+  micPollingTimer = setInterval(async () => {
+    if (answerReceived || attempts > 30 || !micPeer) {
+      if (attempts > 30 && !answerReceived) {
+        stopPhoneMicrophone('Host não respondeu ao microfone. Abra o VoxStage no PC.');
+      }
+      return;
+    }
+    attempts++;
+    try {
+      const res = await api('/api/remote/webrtc/answer');
+      if (res && res.answer && pc.signalingState !== 'stable') {
+        answerReceived = true;
+        clearInterval(micPollingTimer);
+        await pc.setRemoteDescription(new RTCSessionDescription(res.answer));
+        for (const c of (res.candidates || [])) {
+          try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
+        }
+      }
+    } catch {}
+  }, 500);
+}
+
+function stopPhoneMicrophone(msg = 'Microfone desligado.') {
+  clearInterval(micLevelTimer);
+  clearInterval(micPollingTimer);
+  if (micAudioCtx) { try { micAudioCtx.close(); } catch {} micAudioCtx = null; }
+  if (micStream) {
+    micStream.getTracks().forEach(t => t.stop());
+    micStream = null;
+  }
+  if (micPeer) {
+    try { micPeer.close(); } catch {}
+    micPeer = null;
+  }
+  void api('/api/remote/webrtc/reset', { method: 'POST' }).catch(() => {});
+  $('micBadge').textContent = 'Desligado';
+  $('micBadge').style.background = '#252529';
+  $('micBadge').style.color = '#999';
+  $('micLevelContainer').style.display = 'none';
+  $('micStatus').textContent = msg;
+  $('toggleMicBtn').classList.remove('secondary');
+  $('toggleMicBtn').innerHTML = '<span>🎤 Ligar Microfone</span>';
+}
+
+$('toggleMicBtn').onclick = async () => {
+  if (micPeer || micStream) {
+    stopPhoneMicrophone();
+  } else {
+    try {
+      await startPhoneMicrophone();
+    } catch (err) {
+      stopPhoneMicrophone(err.message || String(err));
+    }
+  }
+};
 init();
 </script></body></html>

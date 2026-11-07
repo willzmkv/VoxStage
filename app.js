@@ -1591,6 +1591,18 @@ stopSong = function () {
   if (mobileNative) try { window.VoxStageMedia?.clear(); } catch {}
   setPlayBusy(false);
   if ($('nowLyric')) { $('nowLyric').textContent = ''; $('nowLyric').hidden = true; }
+  if ($('nowTitle')) $('nowTitle').textContent = 'Escolha uma música';
+  if ($('nowArtist')) $('nowArtist').textContent = 'Seu palco está esperando';
+  if ($('miniCover')) { $('miniCover').textContent = '♫'; $('miniCover').className = 'mini-cover'; }
+  if ($('dispTrack')) $('dispTrack').textContent = '';
+  if ($('playBtn')) $('playBtn').textContent = '▶';
+  if ($('dispPlay')) $('dispPlay').textContent = '▶';
+  if ($('currentTime')) $('currentTime').textContent = '0:00';
+  if ($('duration')) $('duration').textContent = '0:00';
+  if ($('dispTime')) $('dispTime').textContent = '0:00';
+  if ($('seek')) $('seek').value = 0;
+  if ($('dispSeek')) $('dispSeek').value = 0;
+  if (typeof setMiniStage === 'function') setMiniStage(null);
   drawWaveform();
 };
 
@@ -4289,14 +4301,36 @@ displayBack10.onclick = () => nudgePlayback(-Math.max(1, Number(processingSettin
 displayForward10.onclick = () => nudgePlayback(Math.max(1, Number(processingSettings.seekStepSeconds) || 10));
 settingsRow.append(wordSyncToggle, fullscreenVolumes, visualSettings);
 updateWordSyncToggle();
-displayExit.textContent = '⤢ Sair'; displayExit.className = 'hud-btn'; displayExit.removeAttribute('style');
-const leaveDisplay = () => {
+displayExit.textContent = '✕ Fechar'; displayExit.className = 'hud-btn'; displayExit.removeAttribute('style');
+displayExit.title = 'Encerrar a apresentação e parar a música';
+const minimizeDisplayBtn = document.createElement('button');
+minimizeDisplayBtn.id = 'minimizeDisplay';
+minimizeDisplayBtn.className = 'hud-btn';
+minimizeDisplayBtn.textContent = '⤢ Minimizar';
+minimizeDisplayBtn.title = 'Minimizar para segundo plano mantendo a música tocando';
+transportRow.insertBefore(minimizeDisplayBtn, displayExit);
+
+const leaveDisplay = (shouldStop = true) => {
   if (manualSyncState || manualSyncDialog.classList.contains('show')) $('closeManualSync').click();
+  if (shouldStop && typeof stopSong === 'function') {
+    stopSong();
+  }
   display.classList.remove('show');
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
 };
-displayExit.onclick = leaveDisplay;
-quickExitButton.onclick = () => displayExit.click();
+displayExit.onclick = () => leaveDisplay(true);
+quickExitButton.onclick = () => leaveDisplay(true);
+minimizeDisplayBtn.onclick = () => leaveDisplay(false);
+
+const bottomCloseBtn = $('closeSessionBtn');
+if (bottomCloseBtn) {
+  bottomCloseBtn.onclick = () => {
+    if (current) {
+      stopSong();
+      toast('Sessão encerrada.');
+    }
+  };
+}
 document.addEventListener('fullscreenchange', () => {
   if (!document.fullscreenElement && manualSyncDialog.classList.contains('show') && !display.classList.contains('show')) $('closeManualSync').click();
 });
@@ -4334,7 +4368,11 @@ async function refreshRemoteInfo() {
   const info = await api('/api/remote/host-info');
   remoteInfo = info;
   if (info.url) { const qrUrl = new URL(info.url); qrUrl.searchParams.set('lang', interfaceLanguage); window.drawVoxstageQr($('remoteQr'), qrUrl.toString()); }
-  $('remoteUrl').textContent = info.url ? info.url.split('#')[0] : 'Não consegui detectar o IP local. Confira a conexão Wi‑Fi.';
+  if (info.httpsUrl) {
+    $('remoteUrl').innerHTML = `<span>${info.url ? info.url.split('#')[0] : ''}</span><br><small style="color:var(--lime);font-size:11px;display:block;margin-top:4px">Para microfone no celular: ${info.httpsUrl.split('#')[0]}</small>`;
+  } else {
+    $('remoteUrl').textContent = info.url ? info.url.split('#')[0] : 'Não consegui detectar o IP local. Confira a conexão Wi‑Fi.';
+  }
 }
 function showRemotePanel() {
   remotePanel.classList.add('show');
@@ -4407,6 +4445,87 @@ async function pollRemoteHost() {
   } catch {} finally { remotePollBusy = false; }
 }
 if (!mobileNative || androidTv) setInterval(() => { if (!androidTv || remoteInfo) pollRemoteHost(); }, 550);
+
+let hostWebRtcPeer = null;
+let hostWebRtcBusy = false;
+
+async function checkWebRtcMicrophone() {
+  if (hostWebRtcBusy) return;
+  try {
+    const session = await api('/api/remote/webrtc/session');
+    if (!session || !session.active || !session.hasOffer) {
+      if (hostWebRtcPeer && (!session || !session.active)) {
+        try { hostWebRtcPeer.close(); } catch {}
+        hostWebRtcPeer = null;
+        if (window.VoxStageVocalMonitor?.isRunning) {
+          window.VoxStageVocalMonitor.stop();
+          toast('Microfone do celular desconectado.');
+        }
+      }
+      return;
+    }
+
+    if (hostWebRtcPeer && hostWebRtcPeer.connectionState === 'connected') return;
+
+    hostWebRtcBusy = true;
+    const { offer, candidates = [] } = await api('/api/remote/webrtc/offer');
+    if (!offer) { hostWebRtcBusy = false; return; }
+
+    if (hostWebRtcPeer) {
+      try { hostWebRtcPeer.close(); } catch {}
+      hostWebRtcPeer = null;
+    }
+
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+    hostWebRtcPeer = pc;
+
+    const hostCandidates = [];
+    pc.onicecandidate = event => {
+      if (event.candidate) {
+        hostCandidates.push(event.candidate.toJSON());
+        void api('/api/remote/webrtc/candidate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role: 'host', candidate: event.candidate.toJSON() })
+        }).catch(() => {});
+      }
+    };
+
+    pc.ontrack = event => {
+      const remoteStream = event.streams[0];
+      if (remoteStream) {
+        if (window.VoxStageVocalMonitor) {
+          window.VoxStageVocalMonitor.connectRemoteStream(remoteStream);
+          toast('🎤 Microfone do Celular Conectado ao Vivo!');
+        }
+      }
+    };
+
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    for (const c of candidates) {
+      try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
+    }
+
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    await api('/api/remote/webrtc/answer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        answer: { sdp: answer.sdp, type: answer.type },
+        candidates: hostCandidates
+      })
+    });
+  } catch (err) {
+    console.warn('[WebRTC Mic Host]', err);
+  } finally {
+    hostWebRtcBusy = false;
+  }
+}
+if (!mobileNative || androidTv) setInterval(checkWebRtcMicrophone, 1500);
 const uploadLyrics = document.createElement('div'); uploadLyrics.className = 'upload-lyrics';
 uploadLyrics.innerHTML = `<button class="btn secondary" id="draftLyricsButton">♫ Buscar letra sincronizada</button><span id="draftLyricsStatus">Opcional · você pode buscar pela internet</span>`;
 $('artistInput').insertAdjacentElement('afterend', uploadLyrics);
@@ -4581,9 +4700,9 @@ if (mobileNative || presentationDevice!=='pc') {
       updateMobileStageModeButton();
     }
   });
-  const leaveDisplayWithOrientation = leaveDisplay;
+  const leaveDisplayWithOrientation = (shouldStop = true) => leaveDisplay(shouldStop);
   $('closeDisplay').onclick = () => {
-    leaveDisplayWithOrientation();
+    leaveDisplayWithOrientation(true);
     if (presentationDevice==='tv') { window.dispatchEvent(new Event('voxstage-tv-library')); return; }
     $('display').classList.remove('mobile-stage-tv');
     if (mobileNative) { try { window.VoxStageMedia?.setOrientation('portrait'); } catch {} }

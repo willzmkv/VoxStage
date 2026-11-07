@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import difflib
 import logging
 import os
 import re
 import sys
 import threading
+import unicodedata
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional, List
 
@@ -25,6 +25,227 @@ logger = logging.getLogger("whisper_aligner")
 _model = None
 _model_name = None
 _model_lock = threading.Lock()
+
+PT_STOPWORDS = {
+    'que', 'de', 'não', 'nao', 'uma', 'para', 'com', 'voce', 'você', 'ele', 'ela',
+    'esta', 'está', 'isso', 'esse', 'essa', 'mais', 'por', 'mas', 'como', 'meu',
+    'minha', 'seu', 'sua', 'tudo', 'tem', 'sempre', 'quando', 'onde', 'aqui', 'agora',
+    'fazer', 'dizer', 'te', 'me', 'se', 'eu', 'nós', 'sou', 'somos', 'são', 'era',
+    'tinha', 'tô', 'tá', 'pra', 'pro', 'olhar', 'amor', 'coração', 'coracao', 'vida',
+    'dia', 'noite', 'só', 'so'
+}
+
+ES_STOPWORDS = {
+    'que', 'de', 'no', 'una', 'para', 'con', 'usted', 'él', 'ella', 'está', 'esto',
+    'este', 'esta', 'más', 'por', 'pero', 'como', 'mi', 'tu', 'todo', 'tiene',
+    'siempre', 'cuando', 'donde', 'aquí', 'ahora', 'hacer', 'decir', 'los', 'las',
+    'del', 'al', 'yo', 'nosotros', 'ellos', 'ellas', 'somos', 'son', 'era', 'tenía',
+    'corazón', 'amor', 'vida'
+}
+
+EN_STOPWORDS = {
+    'the', 'and', 'to', 'of', 'a', 'in', 'that', 'have', 'i', 'it', 'for', 'not',
+    'on', 'with', 'he', 'as', 'you', 'do', 'at', 'this', 'but', 'his', 'by',
+    'from', 'they', 'we', 'say', 'her', 'she', 'or', 'an', 'will', 'my', 'one',
+    'all', 'would', 'there', 'their', 'what', 'so', 'up', 'out', 'if', 'about',
+    'who', 'get', 'which', 'go', 'me', 'when', 'make', 'can', 'like', 'time',
+    'no', 'just', 'him', 'know', 'take', 'your', 'come', 'dont', 'cant'
+}
+
+CONTRACTIONS = {
+    'pra': 'para', 'pro': 'para', 'pras': 'para', 'pros': 'para',
+    'ta': 'esta', 'to': 'estou', 'ce': 'voce', 'ces': 'voces',
+    'num': 'emum', 'numa': 'emuma', 'dum': 'deum', 'duma': 'deuma',
+    'gonna': 'goingto', 'wanna': 'wantto', 'cause': 'because', 'cuz': 'because',
+    'dont': 'dont', 'cant': 'cant', 'wont': 'wont', 'aint': 'aint'
+}
+
+
+def detect_lyrics_language(text: str) -> Optional[str]:
+    tokens = [w.lower() for w in re.findall(r'\b[a-záàâãéèêíïóôõöúçñ]+\b', text.lower())]
+    if not tokens:
+        return None
+    pt_score = sum(1 for w in tokens if w in PT_STOPWORDS)
+    es_score = sum(1 for w in tokens if w in ES_STOPWORDS)
+    en_score = sum(1 for w in tokens if w in EN_STOPWORDS)
+
+    if any(c in text for c in 'ãõç'):
+        pt_score += 6
+    if any(c in text for c in 'ñ¿¡'):
+        es_score += 6
+
+    scores = [('pt', pt_score), ('es', es_score), ('en', en_score)]
+    scores.sort(key=lambda x: x[1], reverse=True)
+    best_lang, best_score = scores[0]
+    return best_lang if best_score >= 2 else None
+
+
+def strip_accents(text: str) -> str:
+    text = unicodedata.normalize('NFD', text)
+    return ''.join(c for c in text if unicodedata.category(c) != 'Mn')
+
+
+def clean_word(w: str) -> str:
+    return re.sub(r'[^a-z0-9]', '', strip_accents(w).lower())
+
+
+def normalize_token(w: str) -> str:
+    cleaned = clean_word(w)
+    return CONTRACTIONS.get(cleaned, cleaned)
+
+
+def lev_dist(s1: str, s2: str) -> int:
+    if len(s1) < len(s2):
+        return lev_dist(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    prev = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        curr = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = prev[j + 1] + 1
+            deletions = curr[j] + 1
+            substitutions = prev[j] + (c1 != c2)
+            curr.append(min(insertions, deletions, substitutions))
+        prev = curr
+    return prev[-1]
+
+
+def word_similarity(u: str, w: str) -> float:
+    nu, nw = normalize_token(u), normalize_token(w)
+    if not nu or not nw:
+        return 0.0
+    if nu == nw:
+        return 1.0
+
+    # Singing verb apocope check (e.g. chorar <-> chora, cantar <-> canta)
+    if (nu.endswith('r') and nu[:-1] == nw) or (nw.endswith('r') and nw[:-1] == nu):
+        return 0.95
+    # Plural check (e.g. olhos <-> olho)
+    if (nu.endswith('s') and nu[:-1] == nw) or (nw.endswith('s') and nw[:-1] == nu):
+        return 0.95
+
+    # Prefix / stem match for lengthened singing words
+    min_len = min(len(nu), len(nw))
+    if min_len >= 3 and (nu.startswith(nw) or nw.startswith(nu)):
+        return 0.88
+
+    dist = lev_dist(nu, nw)
+    max_len = max(len(nu), len(nw))
+    ratio = 1.0 - (dist / max_len)
+    return ratio if ratio >= 0.60 else 0.0
+
+
+def align_tokens_dp(user_tokens: List[Dict[str, Any]], whisper_words: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+    n = len(user_tokens)
+    m = len(whisper_words)
+    if n == 0 or m == 0:
+        return {}
+
+    dp = [[0.0] * (m + 1) for _ in range(n + 1)]
+    back = [[0] * (m + 1) for _ in range(n + 1)]
+
+    for i in range(1, n + 1):
+        dp[i][0] = dp[i - 1][0] - 0.75
+        back[i][0] = 2
+    for j in range(1, m + 1):
+        dp[0][j] = dp[0][j - 1] - 0.35
+        back[0][j] = 3
+
+    for i in range(1, n + 1):
+        u_w = user_tokens[i - 1]['clean']
+        for j in range(1, m + 1):
+            w_w = whisper_words[j - 1]['clean']
+            sim = word_similarity(u_w, w_w)
+            match_score = (3.5 * sim) if sim >= 0.60 else -2.2
+
+            score_diag = dp[i - 1][j - 1] + match_score
+            score_up = dp[i - 1][j] - 0.75
+            score_left = dp[i][j - 1] - 0.35
+
+            best = score_diag
+            b_dir = 1
+            if score_up > best:
+                best = score_up
+                b_dir = 2
+            if score_left > best:
+                best = score_left
+                b_dir = 3
+
+            dp[i][j] = best
+            back[i][j] = b_dir
+
+    matches: Dict[int, Dict[str, Any]] = {}
+    i, j = n, m
+    while i > 0 and j > 0:
+        b_dir = back[i][j]
+        if b_dir == 1:
+            u_idx = i - 1
+            w_idx = j - 1
+            sim = word_similarity(user_tokens[u_idx]['clean'], whisper_words[w_idx]['clean'])
+            if sim >= 0.60:
+                matches[u_idx] = whisper_words[w_idx]
+            i -= 1
+            j -= 1
+        elif b_dir == 2:
+            i -= 1
+        else:
+            j -= 1
+
+    return matches
+
+
+def refine_onset(audio, rough_start_s: float, sr: int = 16000, search_before_s: float = 0.6, search_after_s: float = 0.15) -> float:
+    if audio is None or len(audio) == 0 or rough_start_s <= 0.2:
+        return max(0.0, rough_start_s)
+
+    import numpy as np
+
+    start_sample = max(0, int((rough_start_s - search_before_s) * sr))
+    end_sample = min(len(audio), int((rough_start_s + search_after_s) * sr))
+
+    if end_sample <= start_sample + 320:
+        return rough_start_s
+
+    chunk = audio[start_sample:end_sample]
+    frame_len = int(sr * 0.02)  # 20ms
+    hop = int(sr * 0.01)        # 10ms
+
+    num_frames = (len(chunk) - frame_len) // hop
+    if num_frames < 5:
+        return rough_start_s
+
+    rms = np.zeros(num_frames)
+    for i in range(num_frames):
+        f = chunk[i * hop: i * hop + frame_len]
+        rms[i] = np.sqrt(np.mean(f**2))
+
+    pre_frames = max(1, int((search_before_s * 0.45) / 0.01))
+    baseline = np.median(rms[:pre_frames])
+    peak = np.max(rms)
+
+    if peak <= baseline * 1.6 or peak < 0.008:
+        return rough_start_s
+
+    thresh = baseline + (peak - baseline) * 0.22
+    rough_frame = min(num_frames - 1, int(search_before_s / 0.01))
+
+    onset_frame = rough_frame
+    for i in range(rough_frame, -1, -1):
+        if rms[i] < thresh:
+            onset_frame = i + 1
+            break
+
+    detected_time = (start_sample + onset_frame * hop) / sr
+    return round(float(np.clip(detected_time, rough_start_s - search_before_s, rough_start_s + 0.05)), 3)
+
+
+def estimate_syllables(word: str) -> int:
+    clean = re.sub(r'[^a-záàâãéèêíïóôõöúçñ]', '', word.lower())
+    if not clean:
+        return 1
+    matches = re.findall(r'[aeiouyáéíóúãõâêîôûàèìòùäëïöü]+', clean)
+    return max(1, len(matches))
 
 
 def get_whisper_availability_error() -> Optional[str]:
@@ -72,8 +293,8 @@ def get_whisper_model():
         if local_tiny.is_dir() and (local_tiny / "model.bin").is_file():
             candidates.append((str(local_tiny), "tiny (embutido)"))
 
-        # On CPU, try compute_type in order of compatibility: default (auto-detect), int8, float32
-        compute_types = ["default", "int8", "float32"]
+        # On CPU, try compute_type: int8 (fastest & lowest RAM), float32, default
+        compute_types = ["int8", "float32", "default"]
         last_error = None
 
         for path, label in candidates:
@@ -168,20 +389,47 @@ def align_song_lyrics(
     notify(25, "Carregando modelo Whisper AI...")
     model = get_whisper_model()
 
-    # Create vocabulary prompt from user lyrics to guide Whisper
-    prompt = " ".join(re.findall(r"\w+", plain_lyrics_text)[:60])
+    # Detect language from user lyrics to prevent wrong language hallucination on instrumental intros
+    detected_lang = detect_lyrics_language(plain_lyrics_text)
+    logger.info("Idioma detectado para a letra: %s", detected_lang or "automático")
+
+    # Build rich vocabulary prompt from the first 120 words of the song
+    all_words = plain_lyrics_text.split()
+    prompt = "Música vocal: " + " ".join(all_words[:120])
+
+    # Extract unique vocabulary for Whisper hotwords
+    seen_hotwords = set()
+    hotwords_list = []
+    for w in all_words:
+        cw = clean_word(w)
+        if cw and len(cw) >= 3 and cw not in seen_hotwords and cw not in PT_STOPWORDS and cw not in EN_STOPWORDS:
+            seen_hotwords.add(cw)
+            hotwords_list.append(cw)
+            if len(hotwords_list) >= 80:
+                break
+    hotwords_str = " ".join(hotwords_list) if hotwords_list else None
 
     notify(40, "Reconhecendo voz e fonemas com Whisper AI...")
+    transcribe_kwargs: Dict[str, Any] = {
+        "beam_size": 1,
+        "word_timestamps": True,
+        "condition_on_previous_text": False,
+        "vad_filter": True,
+        "vad_parameters": dict(
+            threshold=0.30,
+            min_speech_duration_ms=100,
+            min_silence_duration_ms=400,
+            speech_pad_ms=400
+        ),
+        "initial_prompt": prompt
+    }
+    if detected_lang:
+        transcribe_kwargs["language"] = detected_lang
+    if hotwords_str:
+        transcribe_kwargs["hotwords"] = hotwords_str
+
     with _model_lock:
-        segs, info = model.transcribe(
-            audio,
-            initial_prompt=prompt,
-            beam_size=1,
-            word_timestamps=True,
-            condition_on_previous_text=False,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500)
-        )
+        segs, info = model.transcribe(audio, **transcribe_kwargs)
         whisper_segments = list(segs)
 
     notify(80, "Alinhando versos e palavras com a melodia...")
@@ -189,7 +437,7 @@ def align_song_lyrics(
     for s in whisper_segments:
         for w in (s.words or []):
             word_str = w.word.strip()
-            clean = re.sub(r"[^\w\s]", "", word_str.lower())
+            clean = clean_word(word_str)
             if clean and w.end > w.start:
                 whisper_words.append({
                     "word": word_str,
@@ -201,7 +449,7 @@ def align_song_lyrics(
     user_tokens = []
     for line_idx, line in enumerate(lines):
         for w_pos, w in enumerate(line.split()):
-            clean = re.sub(r"[^\w\s]", "", w.lower())
+            clean = clean_word(w)
             if clean:
                 user_tokens.append({
                     "line_idx": line_idx,
@@ -210,20 +458,14 @@ def align_song_lyrics(
                     "clean": clean
                 })
 
-    user_cleans = [t["clean"] for t in user_tokens]
-    whisp_cleans = [w["clean"] for w in whisper_words]
+    # Global Monotonic Dynamic Programming Alignment (soft phonetic match)
+    token_matches = align_tokens_dp(user_tokens, whisper_words)
 
-    matcher = difflib.SequenceMatcher(None, user_cleans, whisp_cleans)
-    matches = matcher.get_matching_blocks()
-
-    line_matches = {i: {} for i in range(len(lines))}
-    for m in matches:
-        for offset in range(m.size):
-            u_idx = m.a + offset
-            w_idx = m.b + offset
-            l_idx = user_tokens[u_idx]["line_idx"]
-            w_pos = user_tokens[u_idx]["word_pos"]
-            line_matches[l_idx][w_pos] = whisper_words[w_idx]
+    line_matches: Dict[int, Dict[int, Dict[str, Any]]] = {i: {} for i in range(len(lines))}
+    for u_idx, w_word in token_matches.items():
+        l_idx = user_tokens[u_idx]["line_idx"]
+        w_pos = user_tokens[u_idx]["word_pos"]
+        line_matches[l_idx][w_pos] = w_word
 
     aligned_lines = []
     last_end = 0.0
@@ -231,15 +473,37 @@ def align_song_lyrics(
     for line_idx, line in enumerate(lines):
         matched_dict = line_matches[line_idx]
         words_in_line = line.split()
-        matched_list = sorted(matched_dict.values(), key=lambda x: x["start"])
 
-        if matched_list:
-            start_t = matched_list[0]["start"]
-            end_t = matched_list[-1]["end"]
+        if matched_dict:
+            # Find earliest and latest matched words in this line
+            sorted_pos = sorted(matched_dict.keys())
+            first_pos = sorted_pos[0]
+            last_pos = sorted_pos[-1]
+
+            first_w_start = matched_dict[first_pos]["start"]
+            last_w_end = matched_dict[last_pos]["end"]
+
+            # If word 0 was missing, back-propagate line start based on missing words count
+            if first_pos > 0:
+                missing_before = first_pos
+                est_start = max(last_end + 0.05, first_w_start - missing_before * 0.38)
+                start_t = refine_onset(audio, est_start, search_before_s=0.5, search_after_s=0.15)
+            else:
+                # Refine acoustic vocal onset for word 0
+                start_t = refine_onset(audio, first_w_start, search_before_s=0.5, search_after_s=0.15)
+
+            # If last word in line had missing words after it, forward-propagate line end
+            if last_pos < len(words_in_line) - 1:
+                missing_after = len(words_in_line) - 1 - last_pos
+                end_t = last_w_end + missing_after * 0.38
+            else:
+                end_t = last_w_end
+
             if start_t < last_end:
-                start_t = last_end + 0.05
+                start_t = last_end + 0.04
             if end_t <= start_t:
                 end_t = start_t + max(1.0, len(words_in_line) * 0.35)
+
             last_end = end_t
             aligned_lines.append({
                 "line": line,
@@ -257,7 +521,7 @@ def align_song_lyrics(
                 "matched_dict": {}
             })
 
-    # Interpolate timestamps for lines not directly recognized
+    # Interpolate timestamps for any line not recognized by Whisper
     for i, item in enumerate(aligned_lines):
         if item["start"] is None:
             prev_end = 0.0
@@ -300,15 +564,22 @@ def align_song_lyrics(
         matched_dict = item["matched_dict"]
         line_word_cues = []
 
+        # Smooth syllable-weighted interpolation for all words in line
+        word_syllables = [estimate_syllables(w) for w in words]
+        total_syllables = sum(word_syllables)
+
         prev_w_end = start_s
         for w_pos, w_text in enumerate(words):
             if w_pos in matched_dict:
                 w_start = matched_dict[w_pos]["start"]
                 w_end = matched_dict[w_pos]["end"]
+                # For first word, ensure start snaps to line start onset
+                if w_pos == 0:
+                    w_start = start_s
                 if w_start < prev_w_end:
                     w_start = prev_w_end
                 if w_end <= w_start:
-                    w_end = w_start + 0.25
+                    w_end = w_start + max(0.2, word_syllables[w_pos] * 0.18)
             else:
                 next_w_start = end_s
                 for n_pos in range(w_pos + 1, len(words)):
@@ -316,16 +587,13 @@ def align_song_lyrics(
                         next_w_start = matched_dict[n_pos]["start"]
                         break
 
-                rem_words = 1
-                for n_pos in range(w_pos + 1, len(words)):
-                    if n_pos not in matched_dict:
-                        rem_words += 1
-                    else:
-                        break
+                rem_syllables = sum(word_syllables[k] for k in range(w_pos, len(words)) if k not in matched_dict)
+                rem_syllables = max(1, rem_syllables)
+                available_time = max(0.2, next_w_start - prev_w_end)
+                duration_slice = available_time * (word_syllables[w_pos] / rem_syllables)
 
-                duration_slice = max(0.2, (next_w_start - prev_w_end) / rem_words)
                 w_start = prev_w_end
-                w_end = min(end_s, w_start + duration_slice * 0.95)
+                w_end = min(end_s, w_start + duration_slice)
                 if w_end <= w_start:
                     w_end = w_start + 0.2
 
