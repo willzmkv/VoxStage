@@ -29,22 +29,52 @@
   }
 
   function resolveActiveSong(explicitSong = null) {
-    if (explicitSong && explicitSong.id) return explicitSong;
+    if (explicitSong && (explicitSong.id || explicitSong.lead || explicitSong.source || explicitSong.inst)) return explicitSong;
 
-    // 1. Check lexical current or window.current
+    // 1. Check modal draft when adding or editing a song
+    const modalEl = document.getElementById('modal');
+    const isModalOpen = modalEl && modalEl.classList.contains('show');
+    const isDraftContext = typeof lyricsDialogContext !== 'undefined' && lyricsDialogContext === 'draft';
+    if (isModalOpen || isDraftContext) {
+      try {
+        const draft = (typeof uploadDrafts !== 'undefined' && typeof activeUploadDraftId !== 'undefined')
+          ? uploadDrafts.get(activeUploadDraftId)
+          : null;
+        const title = document.getElementById('titleInput')?.value.trim() || draft?.title || '';
+        const artist = document.getElementById('artistInput')?.value.trim() || draft?.artist || '';
+        const leadFile = draft?.files?.find(f => f.role === 'lead')?.name;
+        const sourceFile = draft?.files?.find(f => f.role === 'source')?.name;
+        const instFile = draft?.files?.find(f => f.role === 'inst')?.name;
+        const draftL = typeof draftLyrics !== 'undefined' ? draftLyrics : null;
+        if (leadFile || sourceFile || instFile || title) {
+          return {
+            id: draft?.editingId || draft?.id || 'draft',
+            title,
+            artist,
+            lead: leadFile,
+            source: sourceFile,
+            inst: instFile,
+            plainLyrics: draftL?.plainLyrics || '',
+            syncedLyrics: draftL?.syncedLyrics || ''
+          };
+        }
+      } catch {}
+    }
+
+    // 2. Check lexical current or window.current
     try {
-      if (typeof current !== 'undefined' && current && current.id) {
+      if (typeof current !== 'undefined' && current && (current.id || current.lead || current.source || current.inst)) {
         window.current = current;
         return current;
       }
     } catch {}
-    if (typeof window.current !== 'undefined' && window.current && window.current.id) {
+    if (typeof window.current !== 'undefined' && window.current && (window.current.id || window.current.lead || window.current.source || window.current.inst)) {
       return window.current;
     }
 
     const all = getAllSongs();
 
-    // 2. Check manualSyncReturn
+    // 3. Check manualSyncReturn
     try {
       if (typeof manualSyncReturn !== 'undefined' && manualSyncReturn?.songId) {
         const found = all.find(s => s.id === manualSyncReturn.songId);
@@ -56,13 +86,13 @@
       if (found) return found;
     }
 
-    // 3. Check editingSong
+    // 4. Check editingSong
     try {
       if (typeof editingSong !== 'undefined' && editingSong && editingSong.id) return editingSong;
     } catch {}
     if (typeof window.editingSong !== 'undefined' && window.editingSong && window.editingSong.id) return window.editingSong;
 
-    // 4. Check display / nowTitle element
+    // 5. Check display / nowTitle element
     const trackEl = document.getElementById('dispTrack') || document.getElementById('nowTitle');
     if (trackEl && trackEl.textContent && trackEl.textContent !== '—' && trackEl.textContent.trim() !== '') {
       const text = trackEl.textContent.trim().toLowerCase();
@@ -70,7 +100,7 @@
       if (found) return found;
     }
 
-    // 5. Fallback: first available song in library
+    // 6. Fallback: first available song in library
     if (all.length) return all[0];
     return null;
   }
@@ -680,8 +710,12 @@
       try {
         const audioDuration = targetSong.duration || (targetSong.buffers?.Inst?.duration) || (targetSong.buffers?.Lead?.duration) || 0;
 
-        // Step 1: Check Online Synced DB if not forced local and has title
-        if (!options.forceLocal && targetSong.title) {
+        // Step 1: Check Online Synced DB ONLY IF:
+        // - Not forced local, AND
+        // - User has NOT provided specific lyrics (lyricsText), AND
+        // - The target song does NOT already have lyrics (plainLyrics or syncedLyrics)
+        const hasExistingLyrics = Boolean(options.lyricsText || targetSong.plainLyrics || targetSong.syncedLyrics);
+        if (!options.forceLocal && !hasExistingLyrics && targetSong.title) {
           onProgress('Buscando correspondência de duração exata no catálogo…', 25);
           const onlineMatch = await fetchOnlineSyncedLyrics(targetSong.title, targetSong.artist, audioDuration);
           if (onlineMatch && onlineMatch.syncedLyrics) {
@@ -697,20 +731,25 @@
         }
 
         // Step 2: High-Accuracy Whisper AI Alignment via Python backend
-        const linesText = options.lyricsText || targetSong.plainLyrics || (options.editorValue) || '';
+        let linesText = options.lyricsText || targetSong.plainLyrics || (options.editorValue) || '';
+        if (!linesText && targetSong.syncedLyrics) {
+          linesText = targetSong.syncedLyrics.replace(/\[\d+:\d+\.?\d*\]/g, '').trim();
+        }
         const rawLines = linesText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
         if (!rawLines.length) {
           return { needsLyricsInput: true, song: targetSong };
         }
 
-        if (typeof window.api === 'function' && targetSong.id) {
+        if (typeof window.api === 'function') {
           try {
             onProgress('Iniciando alinhamento com Whisper AI…', 30);
+            const audioFilename = targetSong.lead || targetSong.source || targetSong.inst || targetSong.audio || '';
             const startRes = await window.api('/api/auto-sync/align', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                songId: targetSong.id,
+                songId: targetSong.id || '',
+                audioFilename: audioFilename,
                 plainLyrics: linesText
               })
             });
@@ -719,7 +758,7 @@
               const jobId = startRes.id;
               let attempts = 0;
               let job = null;
-              while (attempts < 180) {
+              while (attempts < 200) {
                 await new Promise(r => setTimeout(r, 600));
                 attempts++;
                 job = await window.api(`/api/auto-sync/align/${jobId}`);
@@ -745,6 +784,9 @@
 
                 if (job.stage === 'error') {
                   console.warn('Alinhamento Whisper AI retornou erro, tentando fallback acústico:', job.error);
+                  if (typeof window.toast === 'function') {
+                    window.toast(job.error ? `Whisper AI: ${job.error}` : 'Erro no alinhamento.');
+                  }
                   break;
                 }
               }
@@ -846,7 +888,7 @@
           }
 
           // Save to library.json
-          if (typeof window.api === 'function') {
+          if (typeof window.api === 'function' && targetSong.id) {
             const cleanTarget = { ...targetSong };
             delete cleanTarget.buffers;
             delete cleanTarget.lyricVoices;
@@ -859,6 +901,16 @@
               body: JSON.stringify(updated)
             });
             Object.assign(targetSong, updated);
+            if (Array.isArray(window.songs)) {
+              const idx = window.songs.findIndex(s => s.id === targetSong.id);
+              if (idx !== -1) Object.assign(window.songs[idx], updated);
+            }
+            if (typeof render === 'function') render();
+            else if (typeof window.render === 'function') window.render();
+          }
+
+          if (typeof draftLyrics !== 'undefined') {
+            draftLyrics = selection;
           }
 
           // Update current if this song is active
@@ -1053,10 +1105,24 @@
       }
 
       const pasteInput = document.getElementById('lyricsPasteInput');
-      const customLyrics = pasteInput ? pasteInput.value.trim() : '';
+      let customLyrics = pasteInput ? pasteInput.value.trim() : '';
+
+      // If paste input is empty, extract text from song or draft
+      if (!customLyrics && targetSong.plainLyrics) {
+        customLyrics = targetSong.plainLyrics;
+      }
+      if (!customLyrics && targetSong.syncedLyrics) {
+        customLyrics = targetSong.syncedLyrics.replace(/\[\d+:\d+\.?\d*\]/g, '').trim();
+      }
+      if (!customLyrics && typeof draftLyrics !== 'undefined' && draftLyrics) {
+        customLyrics = draftLyrics.plainLyrics || (draftLyrics.syncedLyrics ? draftLyrics.syncedLyrics.replace(/\[\d+:\d+\.?\d*\]/g, '').trim() : '');
+      }
 
       closeLyricsDialogFallback();
-      await this.processAndReadySong(targetSong, { lyricsText: customLyrics || undefined });
+      await this.processAndReadySong(targetSong, {
+        forceLocal: true,
+        lyricsText: customLyrics || undefined
+      });
     }
   };
 

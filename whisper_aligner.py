@@ -2,10 +2,23 @@ from __future__ import annotations
 
 import difflib
 import logging
+import os
 import re
+import sys
 import threading
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional, List
+
+# Ensure Windows finds local MSVC C++ runtime and ctranslate2 DLLs
+if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
+    py_dir = Path(sys.executable).parent
+    app_dir = Path(__file__).resolve().parent
+    for p in [py_dir, py_dir / "Lib" / "site-packages" / "ctranslate2", app_dir, app_dir.parent]:
+        if p.is_dir():
+            try:
+                os.add_dll_directory(str(p))
+            except OSError:
+                pass
 
 logger = logging.getLogger("whisper_aligner")
 
@@ -14,40 +27,84 @@ _model_name = None
 _model_lock = threading.Lock()
 
 
-def is_whisper_available() -> bool:
+def get_whisper_availability_error() -> Optional[str]:
     try:
         import av
+    except Exception as e:
+        return f"Falha ao carregar biblioteca de áudio 'av': {e}"
+    try:
         import numpy
+    except Exception as e:
+        return f"Falha ao carregar 'numpy': {e}"
+    try:
+        import ctranslate2
+    except Exception as e:
+        return f"Falha ao carregar motor de IA 'ctranslate2': {e}"
+    try:
         import faster_whisper
-        return True
-    except ImportError:
-        return False
+    except Exception as e:
+        return f"Falha ao carregar 'faster_whisper': {e}"
+    return None
+
+
+def is_whisper_available() -> bool:
+    return get_whisper_availability_error() is None
 
 
 def get_whisper_model():
     global _model, _model_name
     with _model_lock:
-        if _model is None:
-            from faster_whisper import WhisperModel
-            models_dir = Path(__file__).resolve().parent / "models"
-            local_base = models_dir / "whisper-base"
-            local_tiny = models_dir / "whisper-tiny"
+        if _model is not None:
+            return _model
 
-            if local_base.is_dir() and (local_base / "model.bin").is_file():
-                _model = WhisperModel(str(local_base), device="cpu", compute_type="int8", local_files_only=True)
-                _model_name = "base (bundled)"
-            elif local_tiny.is_dir() and (local_tiny / "model.bin").is_file():
-                _model = WhisperModel(str(local_tiny), device="cpu", compute_type="int8", local_files_only=True)
-                _model_name = "tiny (bundled)"
-            else:
-                # Try 'base' for superior word boundary resolution; fallback to 'tiny'
+        avail_err = get_whisper_availability_error()
+        if avail_err:
+            raise RuntimeError(avail_err)
+
+        from faster_whisper import WhisperModel
+        models_dir = Path(__file__).resolve().parent / "models"
+        local_base = models_dir / "whisper-base"
+        local_tiny = models_dir / "whisper-tiny"
+
+        candidates = []
+        if local_base.is_dir() and (local_base / "model.bin").is_file():
+            candidates.append((str(local_base), "base (embutido)"))
+        if local_tiny.is_dir() and (local_tiny / "model.bin").is_file():
+            candidates.append((str(local_tiny), "tiny (embutido)"))
+
+        # On CPU, try compute_type in order of compatibility: default (auto-detect), int8, float32
+        compute_types = ["default", "int8", "float32"]
+        last_error = None
+
+        for path, label in candidates:
+            for c_type in compute_types:
                 try:
-                    _model = WhisperModel("base", device="cpu", compute_type="int8")
-                    _model_name = "base"
-                except Exception:
-                    _model = WhisperModel("tiny", device="cpu", compute_type="int8")
-                    _model_name = "tiny"
-        return _model
+                    logger.info("Tentando carregar Whisper %s [compute_type=%s]...", label, c_type)
+                    _model = WhisperModel(
+                        path,
+                        device="cpu",
+                        compute_type=c_type,
+                        local_files_only=True
+                    )
+                    _model_name = f"{label} [{c_type}]"
+                    logger.info("Whisper inicializado com sucesso: %s", _model_name)
+                    return _model
+                except Exception as e:
+                    logger.warning("Falha ao inicializar %s (%s): %s", label, c_type, e)
+                    last_error = e
+
+        # If bundled folders were not found, try system cache
+        if not candidates:
+            for size in ["base", "tiny"]:
+                for c_type in compute_types:
+                    try:
+                        _model = WhisperModel(size, device="cpu", compute_type=c_type)
+                        _model_name = f"{size} ({c_type})"
+                        return _model
+                    except Exception as e:
+                        last_error = e
+
+        raise RuntimeError(f"Não foi possível inicializar o modelo Whisper: {last_error or 'modelo não encontrado'}")
 
 
 def decode_audio_16k(audio_path: str | Path):
@@ -55,14 +112,17 @@ def decode_audio_16k(audio_path: str | Path):
     import numpy as np
 
     container = av.open(str(audio_path))
-    resampler = av.AudioResampler(format="fltp", layout="mono", rate=16000)
-    samples = []
-    for frame in container.decode(audio=0):
-        for r_frame in resampler.resample(frame):
-            samples.append(r_frame.to_ndarray()[0])
-    if not samples:
-        raise ValueError("O arquivo de áudio não contém trilha de áudio decodificável.")
-    return np.concatenate(samples).astype(np.float32)
+    try:
+        resampler = av.AudioResampler(format="fltp", layout="mono", rate=16000)
+        samples = []
+        for frame in container.decode(audio=0):
+            for r_frame in resampler.resample(frame):
+                samples.append(r_frame.to_ndarray()[0])
+        if not samples:
+            raise ValueError("O arquivo de áudio não contém trilha de áudio decodificável.")
+        return np.concatenate(samples).astype(np.float32)
+    finally:
+        container.close()
 
 
 def fmt_lrc(sec: float) -> str:
@@ -77,8 +137,9 @@ def align_song_lyrics(
     plain_lyrics_text: str,
     progress_callback: Optional[Callable[[int, str], None]] = None
 ) -> Dict[str, Any]:
-    if not is_whisper_available():
-        raise RuntimeError("As bibliotecas de IA (faster-whisper e av) não estão instaladas neste ambiente.")
+    avail_err = get_whisper_availability_error()
+    if avail_err:
+        raise RuntimeError(f"Whisper AI indisponível: {avail_err}")
 
     if not Path(audio_path).is_file():
         raise FileNotFoundError(f"Arquivo de áudio não encontrado: {audio_path}")

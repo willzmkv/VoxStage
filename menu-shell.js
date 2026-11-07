@@ -52,7 +52,7 @@
   const connectHint=document.createElement('p');connectHint.textContent=txt('Seu celular também pode ser o microfone.','Your phone can be your microphone too.');railFooter.append(connectHint);
   const queueDialog=document.createElement('dialog');queueDialog.id='menuQueueDialog';queueDialog.setAttribute('aria-label',txt('Fila de reprodução','Playback queue'));body.append(queueDialog);
   const sidebar=document.createElement('aside');sidebar.className='menu-sidebar';sidebar.append(brand,nav);
-  const sidebarBottom=document.createElement('div');sidebarBottom.className='menu-sidebar-bottom';sidebarBottom.innerHTML=`<span class="menu-local-label">${txt('Sua música, no seu dispositivo.','Your music, on your device.')}</span><span class="menu-version">VoxStage ${esc(window.VoxStageBuildInfo?.version||'2.0.0')}</span>`;sidebar.append(sidebarBottom);
+  const sidebarBottom=document.createElement('div');sidebarBottom.className='menu-sidebar-bottom';sidebarBottom.innerHTML=`<span class="menu-local-label">${txt('Sua música, no seu dispositivo.','Your music, on your device.')}</span><span class="menu-version">VoxStage ${esc(window.VoxStageBuildInfo?.version||'2.1.0')}</span>`;sidebar.append(sidebarBottom);
   let connectionPage=null,connectionActive=false,activePage=null;
   function notifyPage(key){window.dispatchEvent(new CustomEvent('voxstage-menu-page',{detail:key}));}
   const remoteCard=remotePanel.querySelector('.remote-card');

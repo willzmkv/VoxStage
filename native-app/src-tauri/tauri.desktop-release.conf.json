@@ -3,7 +3,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "VoxStage 2.0.0",
+        "title": "VoxStage 2.1.0",
         "url": "http://127.0.0.1:8000/",
         "width": 1280,
         "height": 820,

@@ -20,6 +20,17 @@ import tempfile
 import threading
 import time
 import traceback
+
+# Ensure Windows finds bundled MSVC C++ runtime and ctranslate2 DLLs
+if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
+    py_dir = Path(sys.executable).parent
+    app_dir = Path(__file__).resolve().parent
+    for p in [py_dir, py_dir / "Lib" / "site-packages" / "ctranslate2", app_dir, app_dir.parent]:
+        if p.is_dir():
+            try:
+                os.add_dll_directory(str(p))
+            except OSError:
+                pass
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, urlencode, unquote, urlparse, parse_qs
@@ -56,11 +67,13 @@ remote_state = {"songId": None, "title": "", "artist": "", "playing": False, "ti
 remote_state_lock = threading.Lock()
 from phone_microphone import PhoneMicrophone
 try:
-    from whisper_aligner import align_song_lyrics, is_whisper_available
+    from whisper_aligner import align_song_lyrics, is_whisper_available, get_whisper_availability_error
 except ImportError:
     align_song_lyrics = None
     def is_whisper_available():
         return False
+    def get_whisper_availability_error():
+        return "Módulo whisper_aligner não encontrado"
 remote_microphone = PhoneMicrophone()
 remote_transfers = {}
 remote_transfers_lock = threading.Lock()
@@ -749,7 +762,7 @@ def read_library():
         return []
 
 
-def auto_sync_align_worker(job_id: str, song_id: str, plain_lyrics: str):
+def auto_sync_align_worker(job_id: str, song_id: str, plain_lyrics: str, audio_filename: Optional[str] = None):
     def progress_callback(pct, msg):
         with align_jobs_lock:
             if job_id in align_jobs:
@@ -757,22 +770,35 @@ def auto_sync_align_worker(job_id: str, song_id: str, plain_lyrics: str):
                 align_jobs[job_id]["message"] = msg
 
     try:
-        if not align_song_lyrics or not is_whisper_available():
-            raise RuntimeError("O módulo Whisper AI local não está disponível neste ambiente.")
+        if not align_song_lyrics:
+            raise RuntimeError("O módulo Whisper AI local não pôde ser carregado.")
+        if not is_whisper_available():
+            err = get_whisper_availability_error() if "get_whisper_availability_error" in globals() else "bibliotecas ausentes"
+            raise RuntimeError(f"Whisper AI indisponível: {err}")
 
-        library = read_library()
-        song = next((s for s in library if s.get("id") == song_id), None)
-        if not song:
-            raise ValueError("Música não encontrada na biblioteca.")
+        audio_path = None
 
-        # Prefer lead vocal track if available, else source mix
-        audio_name = song.get("lead") or song.get("source")
-        if not audio_name or not SAFE_NAME.fullmatch(audio_name):
-            raise ValueError("A música não possui arquivo de áudio válido.")
+        # 1. Direct audio filename from request (works for drafts, direct uploads, etc.)
+        if audio_filename and SAFE_NAME.fullmatch(audio_filename):
+            candidate_path = MEDIA / audio_filename
+            if candidate_path.is_file():
+                audio_path = candidate_path
 
-        audio_path = MEDIA / audio_name
-        if not audio_path.is_file():
-            raise FileNotFoundError(f"Arquivo de áudio não encontrado na pasta music: {audio_name}")
+        # 2. Lookup in library by songId
+        if not audio_path and song_id:
+            library = read_library()
+            song = next((s for s in library if s.get("id") == song_id), None)
+            if song:
+                for field in ["lead", "source", "inst", "back", "audio"]:
+                    val = song.get(field)
+                    if val and SAFE_NAME.fullmatch(val):
+                        cand = MEDIA / val
+                        if cand.is_file():
+                            audio_path = cand
+                            break
+
+        if not audio_path:
+            raise FileNotFoundError("Não foi possível localizar o arquivo de áudio vocal da música na pasta music.")
 
         result = align_song_lyrics(audio_path, plain_lyrics, progress_callback)
         with align_jobs_lock:
@@ -1394,9 +1420,10 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.send_json({"error": "Requisição vazia ou grande demais."}, 400)
                 request = json.loads(self.rfile.read(length))
                 song_id = str(request.get("songId") or "")
+                audio_filename = str(request.get("audioFilename") or request.get("audioName") or "").strip()
                 plain_lyrics = str(request.get("plainLyrics") or "").strip()
-                if not song_id:
-                    return self.send_json({"error": "Identificador da música ausente."}, 400)
+                if not song_id and not audio_filename:
+                    return self.send_json({"error": "Identificador da música ou áudio ausente."}, 400)
                 if not plain_lyrics:
                     return self.send_json({"error": "Letra da música ausente para sincronização."}, 400)
 
@@ -1410,7 +1437,7 @@ class Handler(SimpleHTTPRequestHandler):
                         "message": "Inicializando alinhamento com Whisper AI...",
                         "created": time.time()
                     }
-                threading.Thread(target=auto_sync_align_worker, args=(job_id, song_id, plain_lyrics), daemon=True).start()
+                threading.Thread(target=auto_sync_align_worker, args=(job_id, song_id, plain_lyrics, audio_filename), daemon=True).start()
                 return self.send_json({"id": job_id, "stage": "starting"}, 202)
             except (ValueError, json.JSONDecodeError) as error:
                 return self.send_json({"error": str(error)}, 400)

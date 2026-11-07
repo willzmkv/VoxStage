@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "VoxStage",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "identifier": "app.voxstage.player",
   "build": {
     "devUrl": "http://127.0.0.1:8000",
